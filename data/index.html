@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Routine Planner & Live Monitor</title>
+    <script src="https://jsdelivr.net"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen p-4 flex flex-col items-center justify-center gap-6">
+    
+    <!-- Live WebSocket Dashboard -->
+    <div class="w-full max-w-xl bg-slate-900 text-white p-6 rounded-2xl shadow-xl border border-slate-800">
+        <div class="flex justify-between items-center mb-4">
+            <span class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <span id="statusDot" class="w-2.5 h-2.5 bg-rose-500 rounded-full inline-block animate-pulse"></span> 
+                System <span id="statusText">Disconnected</span>
+            </span>
+            <span id="liveBat" class="text-sm font-semibold text-emerald-400">--% BAT</span>
+        </div>
+        <div class="text-center py-4">
+            <h1 id="liveTask" class="text-xl font-medium text-slate-300 tracking-wide mb-1">No Active Routine</h1>
+            <div id="liveTime" class="text-6xl font-black font-mono tracking-tight text-indigo-400">00:00</div>
+        </div>
+    </div>
+
+    <!-- Configuration Utility Form -->
+    <div class="w-full max-w-xl bg-white p-6 rounded-2xl shadow-xl border border-slate-100">
+        <div class="flex items-center justify-between border-b border-slate-100 pb-4 mb-6">
+            <h2 class="text-2xl font-bold text-indigo-600">Task Routine Setup</h2>
+            <span class="text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full">XIAO C3 Configuration</span>
+        </div>
+
+        <form id="routineForm" action="/save" method="POST" onsubmit="preparePayload(event)" class="space-y-4">
+            <input type="hidden" id="jsonOutput" name="json">
+            
+            <div id="taskListSpace" class="space-y-3 max-h-[40vh] overflow-y-auto pr-1">
+                <!-- Javascript builds rows dynamic list modules here -->
+            </div>
+
+            <button type="button" onclick="addTaskRow('', 300)" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-xl transition flex items-center justify-center gap-2 text-sm cursor-pointer">
+                + Add Routine Step
+            </button>
+
+            <div class="pt-4 border-t border-slate-100 flex gap-3">
+                <button type="submit" class="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-md shadow-indigo-100 transition cursor-pointer text-center">
+                    Apply Changes & Sync
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        const serverData = %TASK_JSON%;
+        let gateway = `ws://${window.location.hostname}/ws`;
+        let websocket;
+
+        function initWebSocket() {
+            websocket = new WebSocket(gateway);
+            websocket.onopen = () => {
+                document.getElementById('statusDot').className = "w-2.5 h-2.5 bg-emerald-500 rounded-full inline-block";
+                document.getElementById('statusText').innerText = "Live Connected";
+            };
+            websocket.onclose = () => {
+                document.getElementById('statusDot').className = "w-2.5 h-2.5 bg-rose-500 rounded-full inline-block animate-pulse";
+                document.getElementById('statusText').innerText = "Disconnected";
+                setTimeout(initWebSocket, 2000);
+            };
+            websocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                document.getElementById('liveTask').innerText = data.task || "Idle / Stopped";
+                document.getElementById('liveTime').innerText = data.time || "00:00";
+                document.getElementById('liveBat').innerText = data.battery + "% BAT";
+                if(data.isPaused) {
+                    document.getElementById('liveTime').className = "text-6xl font-black font-mono tracking-tight text-amber-400";
+                } else {
+                    document.getElementById('liveTime').className = "text-6xl font-black font-mono tracking-tight text-emerald-400";
+                }
+            };
+        }
+
+        function addTaskRow(name = "", duration = 600) {
+            const container = document.getElementById("taskListSpace");
+            const row = document.createElement("div");
+            row.className = "task-row flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100";
+            
+            row.innerHTML = `
+                <div class="flex-1">
+                    <input type="text" placeholder="Task Name" value="${name}" class="task-name w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500" required>
+                </div>
+                <div class="w-28 flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg px-2 py-2">
+                    <input type="number" placeholder="Min" value="${Math.floor(duration / 60)}" min="1" class="task-min w-full bg-transparent text-center text-sm font-semibold focus:outline-none" required>
+                    <span class="text-xs text-slate-400 font-medium">min</span>
+                </div>
+                <button type="button" onclick="this.parentElement.remove()" class="p-2 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-rose-50 transition cursor-pointer">Delete</button>
+            `;
+            container.appendChild(row);
+        }
+
+        function preparePayload(e) {
+            const rows = document.querySelectorAll(".task-row");
+            const payload = [];
+            rows.forEach(row => {
+                const name = row.querySelector(".task-name").value.trim();
+                const mins = parseInt(row.querySelector(".task-min").value) || 0;
+                if(name) payload.push({ name: name, duration: mins * 60 });
+            });
+            document.getElementById("jsonOutput").value = JSON.stringify(payload);
+        }
+
+        window.addEventListener('load', () => {
+            initWebSocket();
+            if(Array.isArray(serverData) && serverData.length > 0) {
+                serverData.forEach(item => addTaskRow(item.name, item.duration));
+            } else {
+                addTaskRow("Drink Coffee", 600);
+            }
+        });
+    </script>
+</body>
+</html>
