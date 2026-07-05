@@ -8,49 +8,59 @@
 #include <LittleFS.h>
 #include <vector>
 
-// Core Display Engine Framework
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 
-// Hardware Pin Defs for Seeed Studio XIAO ESP32-C3
 #define BUZZER_PIN 6      // Labeled D4
-#define BTN_NEXT_PIN 7    // Labeled D5
-#define BTN_PAUSE_PIN 21  // Labeled D6 (GPIO 21)
+#define TOUCH_CS_PIN 7    // Labeled D5 (GPIO 7)
 #define BATTERY_ADC_PIN 2 // Labeled D0 / A0
-
 #define IDLE_SLEEP_TIMEOUT_MS 300000
 
-// Dynamic LovyanGFX Hardware Bus Mapping Class Configuration
+// Fine-tuned configuration architecture optimized for the red AliExpress panel
 class LGFX_XIAO_ILI9341 : public lgfx::LGFX_Device
 {
   lgfx::Panel_ILI9341 _panel_instance;
   lgfx::Bus_SPI _bus_instance;
+  lgfx::Touch_XPT2046 _touch_instance;
 
 public:
   LGFX_XIAO_ILI9341()
   {
-    { // Configure standard high-speed SPI bus communication pipeline paths
+    { // Configure Primary Shared SPI Bus Lines
       auto cfg = _bus_instance.config();
       cfg.spi_host = SPI2_HOST;
       cfg.spi_mode = 0;
-      cfg.freq_write = 40000000; // Standard stable 40MHz write frequency
-      cfg.pin_sclk = 8;          // SCK / D8
-      cfg.pin_mosi = 10;         // MOSI / D10
-      cfg.pin_miso = 9;          // MISO / D9
-      cfg.pin_dc = 4;            // DC / D2
+      cfg.freq_write = 40000000; // Stable fast write speed for ILI9341
+      cfg.freq_read = 16000000;
+      cfg.pin_sclk = 8;  // SCK / D8
+      cfg.pin_mosi = 10; // SDI / D10
+      cfg.pin_miso = 9;  // SDO / D9
+      cfg.pin_dc = 4;    // DC / D2
       _bus_instance.config(cfg);
       _panel_instance.setBus(&_bus_instance);
     }
-    { // Sync physical screen alignment profiles
+    { // Sync LCD Display Panel Options
       auto cfg = _panel_instance.config();
       cfg.pin_cs = 3;  // CS / D1
-      cfg.pin_rst = 5; // RST / D3
+      cfg.pin_rst = 5; // RESET / D3
       cfg.panel_width = 240;
       cfg.panel_height = 320;
       cfg.offset_x = 0;
       cfg.offset_y = 0;
-      cfg.invert = true; // FIX: Changed from 'inverted' to 'invert' to match API bounds
+      cfg.invert = false; // The red AliExpress panel does NOT require color inversion
       _panel_instance.config(cfg);
+    }
+    { // Sync Resistive XPT2046 Touch Layer Parameters
+      auto cfg = _touch_instance.config();
+      cfg.x_min = 300; // Standard resistance range tracking coordinates
+      cfg.x_max = 3900;
+      cfg.y_min = 200;
+      cfg.y_max = 3700;
+      cfg.pin_cs = TOUCH_CS_PIN; // T_CS / D5 (GPIO 7)
+      cfg.freq = 2500000;        // Hardware constraint: XPT2046 requires safe 2.5MHz clock limits
+      cfg.bus_shared = true;
+      _touch_instance.config(cfg);
+      _panel_instance.setTouch(&_touch_instance);
     }
     setPanel(&_panel_instance);
   }
@@ -76,19 +86,6 @@ int cachedBatteryPercentage = 100;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-volatile bool nextButtonPressed = false;
-volatile bool pauseButtonPressed = false;
-
-void IRAM_ATTR handleNextButton()
-{
-  nextButtonPressed = true;
-}
-
-void IRAM_ATTR handlePauseButton()
-{
-  pauseButtonPressed = true;
-}
-
 int calculateBatteryPercentage()
 {
   uint32_t rawSum = 0;
@@ -97,9 +94,7 @@ int calculateBatteryPercentage()
     rawSum += analogReadMilliVolts(BATTERY_ADC_PIN);
     delay(2);
   }
-  // Safe 200k/200k external resistor tracking math evaluation calculation logic
   float cellVoltage = ((rawSum / 10.0f) * 2.0f) / 1000.0f;
-
   if (cellVoltage >= 4.20f)
     return 100;
   if (cellVoltage <= 3.50f)
@@ -107,20 +102,19 @@ int calculateBatteryPercentage()
   return (int)((cellVoltage - 3.50f) / (4.20f - 3.50f) * 100.0f);
 }
 
-String formatTime(long totalSeconds)
-{
+String formatTime(long totalSeconds) {
   int minutes = totalSeconds / 60;
   int seconds = totalSeconds % 60;
-  char buffer[16];
+  char buffer[16]; // FIX: Changed from 'char buffer' to a char array buffer
   snprintf(buffer, sizeof(buffer), "%02d:%02d", minutes, seconds);
   return String(buffer);
 }
+
 
 void broadcastStateViaWebSocket()
 {
   if (ws.count() == 0)
     return;
-
   JsonDocument doc;
   if (!taskList.empty() && !isPaused && timeRemaining > 0)
   {
@@ -139,7 +133,6 @@ void broadcastStateViaWebSocket()
   }
   doc["battery"] = cachedBatteryPercentage;
   doc["isPaused"] = isPaused;
-
   String response;
   serializeJson(doc, response);
   ws.textAll(response);
@@ -151,20 +144,29 @@ void enterDeepSleep()
   tft.setTextDatum(textdatum_t::middle_center);
   tft.setTextColor(TFT_DARKGREY);
   tft.drawString("Deep Sleeping...", 120, 140, &fonts::Font4);
-  tft.drawString("Press Next to Wake", 120, 180, &fonts::Font2);
+  tft.drawString("Touch Screen to Wake", 120, 180, &fonts::Font2);
   delay(1000);
 
-  tft.writeCommand(0x10); // Native Sleep execution register command shift
+  tft.writeCommand(0x10); // Display Hardware Sleep Command
 
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << BTN_NEXT_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+  // Maps Touch Chip Select pin (GPIO 7) to act as hardware wakeup trigger pin
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_CS_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
   esp_deep_sleep_start();
+}
+
+void drawButton(int x, int y, int w, int h, String label, uint32_t color)
+{
+  tft.fillRoundRect(x, y, w, h, 8, color);
+  tft.drawRoundRect(x, y, w, h, 8, TFT_WHITE);
+  tft.setTextDatum(textdatum_t::middle_center);
+  tft.setTextColor(TFT_WHITE);
+  tft.drawString(label, x + (w / 2), y + (h / 2), &fonts::Font2);
 }
 
 void updateDisplay()
 {
   tft.fillScreen(TFT_BLACK);
 
-  // Render battery tracking text to the top-right corner
   tft.setTextDatum(textdatum_t::top_right);
   tft.setTextColor(TFT_DARKGREY);
   tft.drawString(String(cachedBatteryPercentage) + "% BAT", 230, 10, &fonts::Font2);
@@ -177,26 +179,27 @@ void updateDisplay()
     return;
   }
 
-  // Draw current primary running target names
   tft.setTextDatum(textdatum_t::top_center);
   tft.setTextColor(TFT_CYAN);
-  tft.drawString(taskList[currentTaskIndex].name, 120, 50, &fonts::Font4);
+  tft.drawString(taskList[currentTaskIndex].name, 120, 45, &fonts::Font4);
 
-  // Print current relative clock position elements
   tft.setTextDatum(textdatum_t::middle_center);
   tft.setTextColor(isPaused ? TFT_YELLOW : TFT_GREEN, TFT_BLACK);
-  tft.drawString(formatTime(timeRemaining), 120, 150, &fonts::Font7);
+  tft.drawString(formatTime(timeRemaining), 120, 125, &fonts::Font7);
 
-  // Compute alternative pipeline context visibility flags
+  // Graphical Target Box Visual Anchors
+  drawButton(15, 220, 95, 45, isPaused ? "RESUME" : "PAUSE", isPaused ? 0x03E0 : 0xD3A0);
+  drawButton(130, 220, 95, 45, "SKIP NEXT", 0x318F);
+
   tft.setTextDatum(textdatum_t::bottom_center);
   tft.setTextColor(TFT_DARKGREY);
   if (currentTaskIndex + 1 < (int)taskList.size())
   {
-    tft.drawString("Next: " + taskList[currentTaskIndex + 1].name, 120, 290, &fonts::Font2);
+    tft.drawString("Next: " + taskList[currentTaskIndex + 1].name, 120, 305, &fonts::Font2);
   }
   else
   {
-    tft.drawString("Final Task Sequence", 120, 290, &fonts::Font2);
+    tft.drawString("Final Task Sequence", 120, 305, &fonts::Font2);
   }
 }
 
@@ -244,7 +247,6 @@ void triggerAlarm()
   tft.setTextDatum(textdatum_t::middle_center);
   tft.setTextColor(TFT_WHITE);
   tft.drawString("TIME'S UP!", 120, 160, &fonts::Font4);
-
   for (int i = 0; i < 5; i++)
   {
     tone(BUZZER_PIN, 1000, 300);
@@ -264,21 +266,14 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
 void setup()
 {
   Serial.begin(115200);
-
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(BTN_NEXT_PIN, INPUT_PULLUP);
-  pinMode(BTN_PAUSE_PIN, INPUT_PULLUP);
   analogReadResolution(12);
 
-  // FIX: Passed raw pin numbers straight into ISR attachment loops to bypass missing macro references
-  attachInterrupt(BTN_NEXT_PIN, handleNextButton, FALLING);
-  attachInterrupt(BTN_PAUSE_PIN, handlePauseButton, FALLING);
-
   tft.init();
-  tft.setRotation(2); // Inverted axis adjustment
+  tft.setRotation(2); // Match orientation
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE);
-  tft.drawString("Booting LovyanGFX...", 10, 10, &fonts::Font2);
+  tft.drawString("Booting Lovyan Touch...", 10, 10, &fonts::Font2);
 
   if (!LittleFS.begin(true))
   {
@@ -332,35 +327,39 @@ void loop()
 {
   ws.cleanupClients();
 
-  if (nextButtonPressed)
+  // Dynamic Touch Vector Detection Matrix Processor
+  int32_t touchX = 0, touchY = 0;
+  if (tft.getTouch(&touchX, &touchY))
   {
-    delay(50);
-    if (digitalRead(BTN_NEXT_PIN) == LOW)
+    lastActivityTime = millis(); // Reset idle sleep matrix timer
+
+    // Bounds Check across Button Y-Axis Segment
+    if (touchY >= 220 && touchY <= 265)
     {
-      lastActivityTime = millis();
-      if (!taskList.empty())
+
+      // Target Check A: Left Button (Pause/Resume Match)
+      if (touchX >= 15 && touchX <= 110)
       {
-        currentTaskIndex = (currentTaskIndex + 1) % taskList.size();
-        timeRemaining = taskList[currentTaskIndex].durationSeconds;
-        isPaused = false;
+        isPaused = !isPaused;
         updateDisplay();
         broadcastStateViaWebSocket();
+        delay(300); // Prevent multi-trigger bouncing
+      }
+
+      // Target Check B: Right Button (Skip Next Routine Item)
+      else if (touchX >= 130 && touchX <= 225)
+      {
+        if (!taskList.empty())
+        {
+          currentTaskIndex = (currentTaskIndex + 1) % taskList.size();
+          timeRemaining = taskList[currentTaskIndex].durationSeconds;
+          isPaused = false;
+          updateDisplay();
+          broadcastStateViaWebSocket();
+          delay(300);
+        }
       }
     }
-    nextButtonPressed = false;
-  }
-
-  if (pauseButtonPressed)
-  {
-    delay(50);
-    if (digitalRead(BTN_PAUSE_PIN) == LOW)
-    {
-      lastActivityTime = millis();
-      isPaused = !isPaused;
-      updateDisplay();
-      broadcastStateViaWebSocket();
-    }
-    pauseButtonPressed = false;
   }
 
   if (millis() - lastBatteryCheckTime >= 30000)
@@ -368,7 +367,6 @@ void loop()
     lastBatteryCheckTime = millis();
     cachedBatteryPercentage = calculateBatteryPercentage();
   }
-
   if (!isPaused && !taskList.empty())
   {
     if (millis() - lastTickTime >= 1000)

@@ -20,25 +20,27 @@ An advanced, battery-powered task countdown timer built using the Seeed Studio X
 ### 1. Unified Wiring Connections
 Connect your components to the Seeed Studio XIAO pins according to this layout map:
 
-```text
-       +---------------------------------------+
 
-       |         Seeed Studio XIAO C3          |
-       |                                       |
-       |  [D0/A0] <--- Batt Voltage Divider    |
-       |  [D1]    ---> Screen Chip Select (CS) |
-       |  [D2]    ---> Data/Command (DC)       |
-       |  [D3]    ---> Screen Reset (RST)      |
-       |  [D4]    ---> Passive Buzzer (+)      |
-       |  [D5]    <--- Button 1 (Next/Wake)    |
-       |  [D6]    <--- Button 2 (Pause)        |
-       |  [D8]    ---> SPI Clock (SCK)         |
-       |  [D9]    ---> SPI MISO (Unused Panel) |
-       |  [D10]   ---> SPI MOSI (SDI)          |
-       |  [3V3]   ---> VCC (Screen Panel)      |
-       |  [GND]   ---> GND (Common Ground)     |
-       +---------------------------------------+
-```
+---
+
+### Updated Touch Screen Device Wiring Configuration Layout
+Both display logic vectors and input coordinates parse across a single unified SPI bus architecture channel:
+
+          +---------------------------------------+
+
+          |         Seeed Studio XIAO C3          |
+          |                                       |
+          |  [D0/A0] <--- Batt Voltage Divider    |
+          |  [D1]    ---> Screen Chip Select (CS) |
+          |  [D2]    ---> Data/Command (DC)       |
+          |  [D3]    ---> Screen Reset (RST)      |
+          |  [D4]    ---> Passive Buzzer (+)      |
+          |  [D5]    ---> Touch Chip Select (T_CS)|
+          |  [D8]    ---> Shared SPI SCK          |
+          |  [D9]    <--- Shared SPI Touch MISO   |
+          |  [D10]   ---> Shared SPI MOSI / T_DIN |
+          +---------------------------------------+
+--- 
 
 ### 2. External Analog Battery Monitor Divider
 Because the XIAO C3 lacks an internal battery measurement routing connection trace to its onboard ADC pins, you must build an external voltage divider network across the battery rails to sample state levels safely through pin `D0`:
