@@ -1,0 +1,51 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PIO Build Verify",
+			"type": "shell",
+			"command": "C:\\Users\\apoor\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--environment",
+				"seeed_xiao_esp32c3"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "PIO Build Verify 2",
+			"type": "shell",
+			"command": "C:\\Users\\apoor\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--target",
+				"clean",
+				"--environment",
+				"seeed_xiao_esp32c3"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "PIO Build Verify 3",
+			"type": "shell",
+			"command": "C:\\Users\\apoor\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--environment",
+				"seeed_xiao_esp32c3"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "PIO Build Verify Pins",
+			"type": "shell",
+			"command": "C:\\Users\\apoor\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--environment",
+				"seeed_xiao_esp32c3"
+			],
+			"isBackground": false
+		}
+	]
+}

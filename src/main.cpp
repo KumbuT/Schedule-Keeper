@@ -1,408 +1,245 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <DNSServer.h>
-#include <WiFiManager.h>
-#include <ESPAsyncWebServer.h>
-#include <AsyncTCP.h>
-#include <ArduinoJson.h>
 #include <LittleFS.h>
-#include <vector>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <time.h>
 
-#define LGFX_USE_V1
-#include <LovyanGFX.hpp>
+#include "config/Config.h"
+#include "display/DisplayManager.h"
+#include "network/WebServer.h"
+#include "tasks/TaskScheduler.h"
+#include "audio/AudioManager.h"
+#include "sensors/BatteryMonitor.h"
 
-#define BUZZER_PIN 6      // Labeled D4
-#define TOUCH_CS_PIN 7    // Labeled D5 (GPIO 7)
-#define BATTERY_ADC_PIN 2 // Labeled D0 / A0
-#define IDLE_SLEEP_TIMEOUT_MS 300000
+// ─── Globals ─────────────────────────────────────────────────────────────────
+DNSServer dnsServer;
+bool      apMode = false;
 
-// Fine-tuned configuration architecture optimized for the red AliExpress panel
-class LGFX_XIAO_ILI9341 : public lgfx::LGFX_Device
-{
-  lgfx::Panel_ILI9341 _panel_instance;
-  lgfx::Bus_SPI _bus_instance;
-  lgfx::Touch_XPT2046 _touch_instance;
+uint32_t lastTick       = 0;
+uint32_t lastWxFetch    = 0;
+uint32_t lastWsBcast    = 0;
+uint32_t lastBatUpdate  = 0;
 
-public:
-  LGFX_XIAO_ILI9341()
-  {
-    { // Configure Primary Shared SPI Bus Lines
-      auto cfg = _bus_instance.config();
-      cfg.spi_host = SPI2_HOST;
-      cfg.spi_mode = 0;
-      cfg.freq_write = 40000000; // Stable fast write speed for ILI9341
-      cfg.freq_read = 16000000;
-      cfg.pin_sclk = 8;  // SCK / D8
-      cfg.pin_mosi = 10; // SDI / D10
-      cfg.pin_miso = 9;  // SDO / D9
-      cfg.pin_dc = 4;    // DC / D2
-      _bus_instance.config(cfg);
-      _panel_instance.setBus(&_bus_instance);
+// ─── Weather ─────────────────────────────────────────────────────────────────
+void fetchWeather() {
+  auto& cfg = Config::instance();
+  auto& wx  = DisplayManager::instance().weather;
+
+  if (cfg.data.owmApiKey.isEmpty() || cfg.data.city.isEmpty()) return;
+
+  HTTPClient http;
+  String units = cfg.data.metricUnits ? "metric" : "imperial";
+  String url   = "http://api.openweathermap.org/data/2.5/weather?q=" +
+                 cfg.data.city + "&units=" + units +
+                 "&appid=" + cfg.data.owmApiKey;
+
+  http.begin(url);
+  http.setTimeout(8000);
+  int code = http.GET();
+
+  if (code == 200) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, http.getStream());
+    if (!err) {
+      wx.temp        = doc["main"]["temp"].as<float>();
+      wx.feelsLike   = doc["main"]["feels_like"].as<float>();
+      wx.humidity    = doc["main"]["humidity"].as<int>();
+      wx.windSpeed   = doc["wind"]["speed"].as<float>();
+      wx.description = doc["weather"][0]["description"].as<String>();
+      wx.icon        = doc["weather"][0]["icon"].as<String>();
+      wx.valid       = true;
+      Serial.printf("[Weather] %.1f°  %s\n", wx.temp, wx.description.c_str());
     }
-    { // Sync LCD Display Panel Options
-      auto cfg = _panel_instance.config();
-      cfg.pin_cs = 3;  // CS / D1
-      cfg.pin_rst = 5; // RESET / D3
-      cfg.panel_width = 240;
-      cfg.panel_height = 320;
-      cfg.offset_x = 0;
-      cfg.offset_y = 0;
-      cfg.invert = false; // The red AliExpress panel does NOT require color inversion
-      _panel_instance.config(cfg);
-    }
-    { // Sync Resistive XPT2046 Touch Layer Parameters
-      auto cfg = _touch_instance.config();
-      cfg.x_min = 300; // Standard resistance range tracking coordinates
-      cfg.x_max = 3900;
-      cfg.y_min = 200;
-      cfg.y_max = 3700;
-      cfg.pin_cs = TOUCH_CS_PIN; // T_CS / D5 (GPIO 7)
-      cfg.freq = 2500000;        // Hardware constraint: XPT2046 requires safe 2.5MHz clock limits
-      cfg.bus_shared = true;
-      _touch_instance.config(cfg);
-      _panel_instance.setTouch(&_touch_instance);
-    }
-    setPanel(&_panel_instance);
+  } else {
+    Serial.printf("[Weather] HTTP error: %d\n", code);
   }
-};
-
-LGFX_XIAO_ILI9341 tft;
-
-struct Task
-{
-  String name;
-  int durationSeconds;
-};
-
-std::vector<Task> taskList;
-int currentTaskIndex = 0;
-long timeRemaining = 0;
-bool isPaused = false;
-unsigned long lastTickTime = 0;
-unsigned long lastBatteryCheckTime = 0;
-unsigned long lastActivityTime = 0;
-int cachedBatteryPercentage = 100;
-
-AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
-
-int calculateBatteryPercentage()
-{
-  uint32_t rawSum = 0;
-  for (int i = 0; i < 10; i++)
-  {
-    rawSum += analogReadMilliVolts(BATTERY_ADC_PIN);
-    delay(2);
-  }
-  float cellVoltage = ((rawSum / 10.0f) * 2.0f) / 1000.0f;
-  if (cellVoltage >= 4.20f)
-    return 100;
-  if (cellVoltage <= 3.50f)
-    return 0;
-  return (int)((cellVoltage - 3.50f) / (4.20f - 3.50f) * 100.0f);
+  http.end();
 }
 
-String formatTime(long totalSeconds) {
-  int minutes = totalSeconds / 60;
-  int seconds = totalSeconds % 60;
-  char buffer[16]; // FIX: Changed from 'char buffer' to a char array buffer
-  snprintf(buffer, sizeof(buffer), "%02d:%02d", minutes, seconds);
-  return String(buffer);
+// ─── WiFi AP mode (captive portal) ───────────────────────────────────────────
+void startAP() {
+  apMode = true;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("ScheduleTracker-Setup", "setup1234");
+  dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
+  Serial.println("[WiFi] AP mode: ScheduleTracker-Setup");
+  Serial.println("[WiFi] Portal: http://192.168.4.1");
+}
+
+// ─── Task event handler ───────────────────────────────────────────────────────
+void onTaskEvent(const Task& task, TaskEvent event) {
+  if (Config::instance().data.muted) return;
+
+  switch (event) {
+    case TaskEvent::START:
+      Serial.printf("[Task] START: %s\n", task.name.c_str());
+      AudioManager::instance().play(
+        task.audioStart.isEmpty() ? "/audio/starting.wav" : task.audioStart.c_str());
+      break;
+    case TaskEvent::MIDPOINT:
+      Serial.printf("[Task] MIDPOINT: %s\n", task.name.c_str());
+      AudioManager::instance().play(
+        task.audioMid.isEmpty() ? "/audio/halfway.wav" : task.audioMid.c_str());
+      break;
+    case TaskEvent::ONE_MINUTE:
+      Serial.printf("[Task] ONE_MINUTE: %s\n", task.name.c_str());
+      AudioManager::instance().play("/audio/onemin.wav");
+      break;
+    case TaskEvent::COMPLETE:
+      Serial.printf("[Task] COMPLETE: %s\n", task.name.c_str());
+      AudioManager::instance().play(
+        task.audioDone.isEmpty() ? "/audio/done.wav" : task.audioDone.c_str());
+      break;
+  }
 }
 
 
-void broadcastStateViaWebSocket()
-{
-  if (ws.count() == 0)
-    return;
-  JsonDocument doc;
-  if (!taskList.empty() && !isPaused && timeRemaining > 0)
-  {
-    doc["task"] = taskList[currentTaskIndex].name;
-    doc["time"] = formatTime(timeRemaining);
+// ─── WiFi STA mode ───────────────────────────────────────────────────────────
+void startSTA() {
+  auto& cfg = Config::instance();
+  Serial.printf("[WiFi] Connecting to: %s\n", cfg.data.wifiSSID.c_str());
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(cfg.data.wifiSSID.c_str(), cfg.data.wifiPassword.c_str());
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(250);
+    Serial.print(".");
   }
-  else if (isPaused && !taskList.empty())
-  {
-    doc["task"] = taskList[currentTaskIndex].name + " (Paused)";
-    doc["time"] = formatTime(timeRemaining);
-  }
-  else
-  {
-    doc["task"] = "Routine Stopped";
-    doc["time"] = "00:00";
-  }
-  doc["battery"] = cachedBatteryPercentage;
-  doc["isPaused"] = isPaused;
-  String response;
-  serializeJson(doc, response);
-  ws.textAll(response);
-}
+  Serial.println();
 
-void enterDeepSleep()
-{
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(textdatum_t::middle_center);
-  tft.setTextColor(TFT_DARKGREY);
-  tft.drawString("Deep Sleeping...", 120, 140, &fonts::Font4);
-  tft.drawString("Touch Screen to Wake", 120, 180, &fonts::Font2);
-  delay(1000);
-
-  tft.writeCommand(0x10); // Display Hardware Sleep Command
-
-  // Maps Touch Chip Select pin (GPIO 7) to act as hardware wakeup trigger pin
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_CS_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
-  esp_deep_sleep_start();
-}
-
-void drawButton(int x, int y, int w, int h, String label, uint32_t color)
-{
-  tft.fillRoundRect(x, y, w, h, 8, color);
-  tft.drawRoundRect(x, y, w, h, 8, TFT_WHITE);
-  tft.setTextDatum(textdatum_t::middle_center);
-  tft.setTextColor(TFT_WHITE);
-  tft.drawString(label, x + (w / 2), y + (h / 2), &fonts::Font2);
-}
-
-void updateDisplay()
-{
-  tft.fillScreen(TFT_BLACK);
-
-  tft.setTextDatum(textdatum_t::top_right);
-  tft.setTextColor(TFT_DARKGREY);
-  tft.drawString(String(cachedBatteryPercentage) + "% BAT", 230, 10, &fonts::Font2);
-
-  if (taskList.empty())
-  {
-    tft.setTextDatum(textdatum_t::middle_center);
-    tft.setTextColor(TFT_WHITE);
-    tft.drawString("No Tasks Loaded", 120, 160, &fonts::Font4);
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Failed to connect — falling back to AP mode");
+    startAP();  // Declare before use; see below
     return;
   }
 
-  tft.setTextDatum(textdatum_t::top_center);
-  tft.setTextColor(TFT_CYAN);
-  tft.drawString(taskList[currentTaskIndex].name, 120, 45, &fonts::Font4);
+  Serial.printf("[WiFi] Connected. IP: %s\n", WiFi.localIP().toString().c_str());
 
-  tft.setTextDatum(textdatum_t::middle_center);
-  tft.setTextColor(isPaused ? TFT_YELLOW : TFT_GREEN, TFT_BLACK);
-  tft.drawString(formatTime(timeRemaining), 120, 125, &fonts::Font7);
+  // Timezone + NTP
+  setenv("TZ", cfg.data.timezone.c_str(), 1);
+  tzset();
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
 
-  // Graphical Target Box Visual Anchors
-  drawButton(15, 220, 95, 45, isPaused ? "RESUME" : "PAUSE", isPaused ? 0x03E0 : 0xD3A0);
-  drawButton(130, 220, 95, 45, "SKIP NEXT", 0x318F);
-
-  tft.setTextDatum(textdatum_t::bottom_center);
-  tft.setTextColor(TFT_DARKGREY);
-  if (currentTaskIndex + 1 < (int)taskList.size())
-  {
-    tft.drawString("Next: " + taskList[currentTaskIndex + 1].name, 120, 305, &fonts::Font2);
+  // Wait for valid time sync (up to 10s)
+  struct tm ti;
+  int attempts = 0;
+  while (!getLocalTime(&ti) && attempts++ < 20) {
+    delay(500);
   }
-  else
-  {
-    tft.drawString("Final Task Sequence", 120, 305, &fonts::Font2);
+  if (attempts < 20) {
+    Serial.println("[NTP] Time synced");
+  } else {
+    Serial.println("[NTP] Sync timeout — using RTC if available");
   }
+
+  fetchWeather();
+  lastWxFetch = millis();
 }
 
-void loadTasks()
-{
-  if (!LittleFS.exists("/tasks.json"))
-  {
-    taskList.push_back({"Drink Coffee", 600});
-    taskList.push_back({"Restroom Break", 1200});
-    return;
-  }
-  File file = LittleFS.open("/tasks.json", "r");
-  JsonDocument doc;
-  deserializeJson(doc, file);
-  file.close();
 
-  taskList.clear();
-  JsonArray array = doc.as<JsonArray>();
-  for (JsonVariant v : array)
-  {
-    taskList.push_back({v["name"].as<String>(), v["duration"].as<int>()});
-  }
-}
-
-void saveTasks(String jsonString)
-{
-  File file = LittleFS.open("/tasks.json", "w");
-  if (file)
-  {
-    file.print(jsonString);
-    file.close();
-  }
-  loadTasks();
-  currentTaskIndex = 0;
-  if (!taskList.empty())
-    timeRemaining = taskList[currentTaskIndex].durationSeconds;
-  isPaused = false;
-  lastActivityTime = millis();
-  updateDisplay();
-}
-
-void triggerAlarm()
-{
-  tft.fillScreen(TFT_RED);
-  tft.setTextDatum(textdatum_t::middle_center);
-  tft.setTextColor(TFT_WHITE);
-  tft.drawString("TIME'S UP!", 120, 160, &fonts::Font4);
-  for (int i = 0; i < 5; i++)
-  {
-    tone(BUZZER_PIN, 1000, 300);
-    delay(400);
-  }
-}
-
-void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len)
-{
-  if (type == WS_EVT_CONNECT)
-  {
-    lastActivityTime = millis();
-    broadcastStateViaWebSocket();
-  }
-}
-
-void setup()
-{
+// ─── setup() ─────────────────────────────────────────────────────────────────
+void setup() {
   Serial.begin(115200);
-  pinMode(BUZZER_PIN, OUTPUT);
-  analogReadResolution(12);
+  delay(200);
+  Serial.println("\n[Boot] Schedule Tracker starting...");
 
-  tft.init();
-  tft.setRotation(2); // Match orientation
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE);
-  tft.drawString("Booting Lovyan Touch...", 10, 10, &fonts::Font2);
-
-  if (!LittleFS.begin(true))
-  {
-    Serial.println("LittleFS Error");
+  // Init LittleFS
+  if (!LittleFS.begin(true)) {
+    Serial.println("[LittleFS] Mount failed — formatting...");
+    LittleFS.format();
+    LittleFS.begin();
   }
 
-  WiFiManager wm;
-  tft.drawString("AP: TaskTimer-Setup", 10, 40, &fonts::Font2);
-  if (!wm.autoConnect("TaskTimer-Setup"))
-  {
-    ESP.restart();
+  // Load config
+  Config::instance().load();
+
+  // Init hardware
+  BatteryMonitor::instance().begin(/*adcPin=*/1);
+  DisplayManager::instance().begin();
+  AudioManager::instance().begin();
+
+  // Load schedule
+  TaskScheduler::instance().loadFromFile();
+  TaskScheduler::instance().onEvent(onTaskEvent);
+
+  // Network
+  if (Config::instance().data.wifiSSID.isEmpty()) {
+    startAP();
+  } else {
+    startSTA();
   }
 
-  loadTasks();
-  if (!taskList.empty())
-  {
-    timeRemaining = taskList[currentTaskIndex].durationSeconds;
-  }
+  // Web server (serves both AP portal and STA dashboard)
+  AppWebServer::instance().begin();
 
-  cachedBatteryPercentage = calculateBatteryPercentage();
-  lastActivityTime = millis();
-
-  ws.onEvent(onWsEvent);
-  server.addHandler(&ws);
-
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-            { request->send(LittleFS, "/index.html", "text/html", false, [](const String &var) -> String
-                            {
-      if (var == "TASK_JSON") {
-        File file = LittleFS.open("/tasks.json", "r");
-        if (!file) return "[]";
-        String content = file.readString();
-        file.close();
-        return content;
-      }
-      return String(); }); });
-
-  server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request)
-            {
-    if (request->hasParam("json", true)) {
-      String json = request->getParam("json", true)->value();
-      saveTasks(json);
-      request->send(200, "text/html", "<h3>Synced Successfully!</h3><a href='/'>Back</a>");
-    } });
-
-  server.begin();
-  updateDisplay();
+  Serial.println("[Boot] Ready.");
 }
 
-void loop()
-{
-  ws.cleanupClients();
+// ─── loop() ──────────────────────────────────────────────────────────────────
+void loop() {
+  // DNS for captive portal
+  if (apMode) dnsServer.processNextRequest();
 
-  // Dynamic Touch Vector Detection Matrix Processor
-  int32_t touchX = 0, touchY = 0;
-  if (tft.getTouch(&touchX, &touchY))
-  {
-    lastActivityTime = millis(); // Reset idle sleep matrix timer
+  uint32_t now_ms = millis();
 
-    // Bounds Check across Button Y-Axis Segment
-    if (touchY >= 220 && touchY <= 265)
-    {
+  // ── 1-second tick ──────────────────────────────────────────────────────────
+  if (now_ms - lastTick >= 1000) {
+    lastTick = now_ms;
 
-      // Target Check A: Left Button (Pause/Resume Match)
-      if (touchX >= 15 && touchX <= 110)
-      {
-        isPaused = !isPaused;
-        updateDisplay();
-        broadcastStateViaWebSocket();
-        delay(300); // Prevent multi-trigger bouncing
-      }
+    time_t   t   = time(nullptr);
+    struct tm* tm_now = localtime(&t);
 
-      // Target Check B: Right Button (Skip Next Routine Item)
-      else if (touchX >= 130 && touchX <= 225)
-      {
-        if (!taskList.empty())
-        {
-          currentTaskIndex = (currentTaskIndex + 1) % taskList.size();
-          timeRemaining = taskList[currentTaskIndex].durationSeconds;
-          isPaused = false;
-          updateDisplay();
-          broadcastStateViaWebSocket();
-          delay(300);
-        }
+    TaskScheduler::instance().tick(tm_now);
+    DisplayManager::instance().update(tm_now);
+  }
+
+  // ── WebSocket broadcast every 1s ───────────────────────────────────────────
+  if (now_ms - lastWsBcast >= 1000) {
+    lastWsBcast = now_ms;
+    AppWebServer::instance().broadcastStatus();
+  }
+
+  // ── Battery update every 30s ───────────────────────────────────────────────
+  if (now_ms - lastBatUpdate >= 30000) {
+    lastBatUpdate = now_ms;
+    BatteryMonitor::instance().update();
+  }
+
+  // ── Weather refresh every 20 minutes ───────────────────────────────────────
+  if (!apMode && now_ms - lastWxFetch >= 20UL * 60 * 1000) {
+    lastWxFetch = now_ms;
+    fetchWeather();
+  }
+
+  // ── Touch input ────────────────────────────────────────────────────────────
+  static uint32_t lastTouch = 0;
+  if (now_ms - lastTouch > 300) {   // 300ms debounce
+    int zone = DisplayManager::instance().pollTouch();
+    if (zone >= 0) {
+      lastTouch = now_ms;
+      switch (zone) {
+        case 1:  // All Tasks
+          DisplayManager::instance().setScreen(Screen::TASK_LIST);
+          break;
+        case 2:  // Mute toggle
+          {
+            auto& cfg = Config::instance();
+            cfg.data.muted = !cfg.data.muted;
+            cfg.save();
+            Serial.printf("[Touch] Mute: %s\n", cfg.data.muted ? "ON" : "OFF");
+          }
+          break;
+        case 3:  // Back (from task list)
+          DisplayManager::instance().setScreen(Screen::HOME);
+          break;
       }
     }
   }
 
-  if (millis() - lastBatteryCheckTime >= 30000)
-  {
-    lastBatteryCheckTime = millis();
-    cachedBatteryPercentage = calculateBatteryPercentage();
-  }
-  if (!isPaused && !taskList.empty())
-  {
-    if (millis() - lastTickTime >= 1000)
-    {
-      lastTickTime = millis();
-      lastActivityTime = millis();
-      if (timeRemaining > 0)
-      {
-        timeRemaining--;
-        updateDisplay();
-      }
-      else
-      {
-        triggerAlarm();
-        currentTaskIndex++;
-        if (currentTaskIndex < (int)taskList.size())
-        {
-          timeRemaining = taskList[currentTaskIndex].durationSeconds;
-          updateDisplay();
-        }
-        else
-        {
-          currentTaskIndex = 0;
-          timeRemaining = taskList[currentTaskIndex].durationSeconds;
-          isPaused = true;
-          updateDisplay();
-        }
-      }
-      broadcastStateViaWebSocket();
-    }
-  }
-  if (isPaused || taskList.empty())
-  {
-    if (millis() - lastActivityTime >= IDLE_SLEEP_TIMEOUT_MS)
-    {
-      enterDeepSleep();
-    }
-  }
+  // ── Audio ──────────────────────────────────────────────────────────────────
+  AudioManager::instance().loop();
 }

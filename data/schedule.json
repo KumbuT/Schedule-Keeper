@@ -1,0 +1,127 @@
+{
+  "groups": [
+    {
+      "id": "morning",
+      "name": "Start of Day",
+      "icon": "sunrise",
+      "color": "#F4A460",
+      "tasks": [
+        {
+          "id": "t1",
+          "name": "Wake Up",
+          "start_time": "06:00",
+          "duration_min": 10,
+          "audio_start": "/audio/starting.wav",
+          "audio_mid":   "/audio/halfway.wav",
+          "audio_done":  "/audio/done.wav",
+          "recurrence":  "daily",
+          "enabled":     true
+        },
+        {
+          "id": "t2",
+          "name": "Drink Coffee",
+          "start_time": "06:10",
+          "duration_min": 5,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "daily",
+          "enabled":     true
+        },
+        {
+          "id": "t3",
+          "name": "Wash Up",
+          "start_time": "06:15",
+          "duration_min": 15,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "weekdays",
+          "enabled":     true
+        },
+        {
+          "id": "t4",
+          "name": "Get Dressed",
+          "start_time": "06:30",
+          "duration_min": 10,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "weekdays",
+          "enabled":     true
+        },
+        {
+          "id": "t5",
+          "name": "Breakfast",
+          "start_time": "06:40",
+          "duration_min": 20,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "daily",
+          "enabled":     true
+        }
+      ]
+    },
+    {
+      "id": "workblock",
+      "name": "Work Block",
+      "icon": "briefcase",
+      "color": "#4A9EFF",
+      "tasks": [
+        {
+          "id": "t6",
+          "name": "Deep Work",
+          "start_time": "09:00",
+          "duration_min": 90,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "weekdays",
+          "enabled":     true
+        },
+        {
+          "id": "t7",
+          "name": "Stand-up Meeting",
+          "start_time": "10:30",
+          "duration_min": 15,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "weekdays",
+          "enabled":     true
+        }
+      ]
+    },
+    {
+      "id": "winddown",
+      "name": "Wind Down",
+      "icon": "moon",
+      "color": "#A78BFA",
+      "tasks": [
+        {
+          "id": "t8",
+          "name": "Reading",
+          "start_time": "21:00",
+          "duration_min": 30,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "daily",
+          "enabled":     true
+        },
+        {
+          "id": "t9",
+          "name": "Lights Out",
+          "start_time": "21:30",
+          "duration_min": 5,
+          "audio_start": "",
+          "audio_mid":   "",
+          "audio_done":  "",
+          "recurrence":  "daily",
+          "enabled":     true
+        }
+      ]
+    }
+  ]
+}
