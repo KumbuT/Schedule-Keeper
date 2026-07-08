@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schedule Tracker — Config</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root { --bg:#101828; --card:#1a2235; --accent:#00c8ff; --text:#e8f0fe;
+           --sub:#6b7fa3; --border:#1e2d45; --red:#f25c5c; --green:#34d97b; }
+  body { background:var(--bg); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         color:var(--text); padding:16px; max-width:480px; margin:0 auto; }
+  h1 { font-size:18px; font-weight:600; margin-bottom:4px; }
+  p.sub { font-size:12px; color:var(--sub); margin-bottom:20px; }
+  .section { margin-bottom:24px; }
+  .section-title { font-size:10px; text-transform:uppercase; letter-spacing:.12em;
+                    color:var(--accent); margin-bottom:10px; padding-bottom:6px;
+                    border-bottom:1px solid var(--border); }
+  .field { margin-bottom:12px; }
+  .config-label { font-size:11px; color:var(--sub); margin-bottom:3px; display:block; }
+  .config-input { width:100%; background:var(--card); border:1px solid var(--border);
+                   border-radius:6px; padding:7px 10px; font-size:12px; color:var(--text);
+                   font-family:inherit; outline:none; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .save-btn { width:100%; padding:10px; background:var(--accent); border-radius:8px;
+               font-size:13px; font-weight:700; color:#000; border:none;
+               cursor:pointer; margin-top:4px; font-family:inherit; }
+  .owm-hint-box { display:flex; align-items:center; gap:10px; background:var(--card);
+                   border:1px solid var(--border); border-radius:6px; padding:7px 10px;
+                   font-size:12px; }
+  .owm-dot { width:8px; height:8px; border-radius:50%; background:var(--green); flex-shrink:0; }
+  .owm-replace-btn { padding:4px 10px; border-radius:6px; border:1px solid var(--border);
+                      background:transparent; color:var(--accent); font-size:11px;
+                      cursor:pointer; font-family:inherit; }
+  .owm-input-meta { display:flex; justify-content:space-between; margin-top:4px;
+                     font-size:11px; color:var(--sub); }
+  .field-error { margin-top:5px; font-size:11px; color:var(--red); }
+  .group-card { background:var(--card); border-radius:8px; overflow:hidden; margin-bottom:10px; }
+  .group-header { display:flex; align-items:center; padding:8px 10px; gap:8px;
+                   border-bottom:1px solid var(--border); }
+  .group-color { width:12px; height:12px; border-radius:3px; }
+  .group-name { flex:1; font-size:12px; font-weight:600; }
+  .task-row { display:flex; align-items:center; padding:6px 10px;
+               border-bottom:1px solid rgba(30,45,69,0.4); gap:8px; font-size:11px; }
+  .task-row-name { flex:1; color:var(--text); }
+  .task-row-time { color:var(--sub); font-size:10px; }
+  .add-link { padding:6px 10px; font-size:10px; color:var(--accent); display:block; }
+  .add-group-btn { width:100%; padding:9px; background:transparent;
+                    border:1px solid var(--border); color:var(--accent);
+                    border-radius:6px; font-size:12px; cursor:pointer; font-family:inherit; }
+  a { color:var(--accent); text-decoration:none; }
+  .nav { display:flex; gap:8px; margin-bottom:16px; }
+  .nav a { font-size:12px; color:var(--sub); padding:5px 10px; border:1px solid var(--border);
+            border-radius:6px; }
+  .nav a.active { color:var(--accent); border-color:var(--accent); }
+  .toast { display:none; position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+            background:var(--green); color:#000; padding:8px 16px; border-radius:8px;
+            font-size:13px; font-weight:600; }
+</style>
+</head>
+<body>
+
+<h1>⚙️ Schedule Tracker Config</h1>
+<p class="sub"><a href="/">← Dashboard</a></p>
+
+<!-- Device Settings -->
+<div class="section">
+  <div class="section-title">Device Settings</div>
+  <div class="row">
+    <div class="field">
+      <label class="config-label">Timezone</label>
+      <select id="timezone" class="config-input">
+        <option value="UTC0">UTC</option>
+        <option value="GMT0BST,M3.5.0/1,M10.5.0">London (GMT/BST)</option>
+        <option value="EST5EDT,M3.2.0,M11.1.0">New York (ET)</option>
+        <option value="CST6CDT,M3.2.0,M11.1.0">Chicago (CT)</option>
+        <option value="MST7MDT,M3.2.0,M11.1.0">Denver (MT)</option>
+        <option value="PST8PDT,M3.2.0,M11.1.0">Los Angeles (PT)</option>
+        <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney (AEST)</option>
+        <option value="JST-9">Tokyo (JST)</option>
+        <option value="CET-1CEST,M3.5.0,M10.5.0/3">Berlin (CET)</option>
+        <option value="GST-4">Dubai (GST)</option>
+        <option value="IST-5:30">India (IST)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label class="config-label">Units</label>
+      <select id="units" class="config-input">
+        <option value="metric">°C / Metric</option>
+        <option value="imperial">°F / Imperial</option>
+      </select>
+    </div>
+  </div>
+  <div class="field">
+    <label class="config-label">Weather City</label>
+    <input type="text" id="city" class="config-input" placeholder="e.g. London">
+  </div>
+
+  <!-- OWM Key field with Replace flow -->
+  <div class="field" id="owm-field">
+    <label class="config-label">OpenWeatherMap API Key</label>
+    <div id="owm-hint-row" style="display:none">
+      <div class="owm-hint-box">
+        <div class="owm-dot" id="owm-dot"></div>
+        <span id="owm-hint-text" style="flex:1;font-family:monospace"></span>
+        <span id="owm-status-text" style="font-size:10px;color:var(--sub)">active</span>
+        <button class="owm-replace-btn" onclick="startReplaceKey()">Replace</button>
+      </div>
+    </div>
+    <div id="owm-input-row">
+      <input type="text" id="owm-input" class="config-input"
+             placeholder="Paste 32-character API key"
+             maxlength="32" autocomplete="off" spellcheck="false">
+      <div class="owm-input-meta">
+        <span id="owm-char-count">0 / 32</span>
+        <span id="owm-cancel-link" style="display:none">
+          <a href="#" onclick="cancelReplaceKey();return false">Cancel</a>
+        </span>
+      </div>
+    </div>
+    <div id="owm-error" class="field-error" style="display:none"></div>
+  </div>
+
+  <button class="save-btn" onclick="saveConfig()">Save Settings</button>
+</div>
+
+<!-- Task Groups -->
+<div class="section">
+  <div class="section-title">Task Groups</div>
+  <div id="groups-container">
+    <div style="color:var(--sub);font-size:12px;text-align:center;padding:20px;">Loading schedule…</div>
+  </div>
+  <button class="add-group-btn" onclick="addGroup()">＋ Add Group</button>
+</div>
+
+<div class="toast" id="toast">Saved ✓</div>
+
+<script>
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg + ' ✓';
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 2000);
+}
+
+let owmKeyIsSet     = false;
+let owmKeyReplacing = false;
+
+// Call this after GET /api/config returns
+function initOwmField(config) {
+  owmKeyIsSet = config.owmkey_set;
+
+  if (owmKeyIsSet) {
+    document.getElementById('owm-hint-text').textContent = config.owmkey_hint;
+
+    if (config.weather_error === 'API key invalid') {
+      const s = document.getElementById('owm-status-text');
+      s.textContent = 'invalid — replace key';
+      s.style.color = 'var(--red)';
+      document.querySelector('.owm-dot').style.background = 'var(--red)';
+    }
+
+    document.getElementById('owm-hint-row').style.display  = 'flex';
+    document.getElementById('owm-input-row').style.display = 'none';
+  } else {
+    document.getElementById('owm-hint-row').style.display  = 'none';
+    document.getElementById('owm-input-row').style.display = 'block';
+  }
+}
+
+function startReplaceKey() {
+  owmKeyReplacing = true;
+  document.getElementById('owm-hint-row').style.display  = 'none';
+  document.getElementById('owm-input-row').style.display = 'block';
+  document.getElementById('owm-cancel-link').style.display = 'inline';
+  document.getElementById('owm-input').focus();
+}
+
+function cancelReplaceKey() {
+  owmKeyReplacing = false;
+  document.getElementById('owm-input').value = '';
+  document.getElementById('owm-input-row').style.display = 'none';
+  document.getElementById('owm-hint-row').style.display  = 'flex';
+  document.getElementById('owm-cancel-link').style.display = 'none';
+  document.getElementById('owm-error').style.display = 'none';
+}
+
+// Live character counter
+document.getElementById('owm-input').addEventListener('input', function() {
+  const n = this.value.trim().length;
+  const counter = document.getElementById('owm-char-count');
+  counter.textContent = `${n} / 32`;
+  counter.style.color = n === 0 ? '' : n === 32 ? 'var(--green)' : 'var(--red)';
+});
+
+// Returns: string = new key to send | null = no change | undefined = validation error
+function getOwmKeyForSave() {
+  const input = document.getElementById('owm-input').value.trim();
+
+  if (!owmKeyIsSet) {
+    // No key set — empty is fine (skips weather), any non-empty value gets validated
+    if (input && !/^[a-f0-9]{32}$/.test(input)) {
+      document.getElementById('owm-error').textContent =
+        'Key must be 32 lowercase hex characters.';
+      document.getElementById('owm-error').style.display = 'block';
+      return undefined;
+    }
+    return input || null;
+  }
+
+  if (owmKeyReplacing) {
+    if (!input) {
+      document.getElementById('owm-error').textContent =
+        'Enter a new key, or tap Cancel to keep the existing one.';
+      document.getElementById('owm-error').style.display = 'block';
+      return undefined;
+    }
+    if (!/^[a-f0-9]{32}$/.test(input)) {
+      document.getElementById('owm-error').textContent =
+        'Key must be 32 lowercase hex characters. Check you copied it fully.';
+      document.getElementById('owm-error').style.display = 'block';
+      return undefined;
+    }
+    document.getElementById('owm-error').style.display = 'none';
+    return input;
+  }
+
+  return null;  // Key set, user didn't click Replace — leave untouched
+}
+
+async function saveConfig() {
+  const owmKey = getOwmKeyForSave();
+  if (owmKey === undefined) return;  // Validation failed
+
+  const payload = {
+    timezone: document.getElementById('timezone').value,
+    city:     document.getElementById('city').value.trim(),
+    metric:   document.getElementById('units').value === 'metric',
+  };
+  if (owmKey !== null) payload.owmkey = owmKey;
+
+  const res = await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (res.ok) {
+    // Reload to refresh masked hint with new key tail
+    await loadConfig();
+    showToast('Settings saved');
+  }
+}
+
+async function loadConfig() {
+  const res    = await fetch('/api/config');
+  const config = await res.json();
+  document.getElementById('timezone').value = config.timezone || 'UTC0';
+  document.getElementById('city').value     = config.city     || '';
+  document.getElementById('units').value    = config.metric   ? 'metric' : 'imperial';
+  initOwmField(config);
+}
+
+loadConfig();
+
+
+// Load schedule groups
+async function loadSchedule() {
+  try {
+    const res  = await fetch('/api/schedule');
+    const data = await res.json();
+    renderGroups(data.groups || []);
+  } catch(e) {
+    document.getElementById('groups-container').innerHTML =
+      '<div style="color:var(--red);font-size:12px;padding:12px;">Could not load schedule</div>';
+  }
+}
+
+function renderGroups(groups) {
+  const c = document.getElementById('groups-container');
+  if (!groups.length) {
+    c.innerHTML = '<div style="color:var(--sub);font-size:12px;text-align:center;padding:20px;">No groups yet</div>';
+    return;
+  }
+  c.innerHTML = groups.map(g => `
+    <div class="group-card">
+      <div class="group-header">
+        <div class="group-color" style="background:${g.color || '#00c8ff'}"></div>
+        <div class="group-name">${g.icon || ''} ${g.name}</div>
+        <span style="font-size:10px;color:var(--sub)">${g.tasks?.length || 0} tasks</span>
+      </div>
+      ${(g.tasks || []).map(t => `
+        <div class="task-row">
+          <div class="task-row-name">${t.name}</div>
+          <div class="task-row-time">${t.start_time} · ${t.duration_min} min · ${t.recurrence}</div>
+        </div>
+      `).join('')}
+      <a class="add-link" href="#">＋ Add task</a>
+    </div>
+  `).join('');
+}
+
+function addGroup() {
+  const name = prompt('Group name:');
+  if (!name) return;
+  // TODO: POST new group to /api/schedule
+}
+
+loadSchedule();
+</script>
+</body>
+</html>

@@ -12,6 +12,12 @@ public:
   void loop();                  // Call every loop() iteration
   bool isPlaying() const { return _playing; }
 
+  // Touch feedback — generates a short tone directly into the I2S DMA buffer.
+  // Non-blocking: fills one DMA buffer worth of samples and returns immediately.
+  // freq: tone frequency in Hz (default 1200Hz — crisp without being harsh)
+  // durationMs: tone length in milliseconds (default 18ms)
+  void beep(uint16_t freq = 1200, uint16_t durationMs = 18);
+
 private:
   AudioManager() {}
 

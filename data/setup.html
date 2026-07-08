@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schedule Tracker — Setup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background:#101828; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         color:#e8f0fe; padding:28px 20px 48px; max-width:480px; margin:0 auto; }
+  h1 { font-size:20px; font-weight:600; margin-bottom:6px; }
+  p.sub { font-size:12px; color:#6b7fa3; margin-bottom:24px; }
+  .field { margin-bottom:16px; }
+  label { display:block; font-size:11px; color:#6b7fa3; margin-bottom:4px; }
+  input, select { width:100%; background:#1a2235; border:1px solid #1e2d45;
+                   border-radius:8px; padding:9px 12px; font-size:13px; color:#e8f0fe;
+                   font-family:inherit; outline:none; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .btn { width:100%; padding:12px; background:#00c8ff; border-radius:8px;
+          font-size:14px; font-weight:700; color:#000; border:none;
+          cursor:pointer; margin-top:8px; font-family:inherit; }
+  .btn:disabled { opacity:0.5; cursor:not-allowed; }
+  .hint { font-size:11px; color:#6b7fa3; text-align:center; margin-top:12px; opacity:0.7; }
+  .error-box { display:none; background:#2a1010; border:1px solid #3d1a1a;
+                border-radius:8px; padding:10px 12px; margin-bottom:12px; }
+  .error-item { font-size:12px; color:#f25c5c; padding:3px 0; }
+</style>
+</head>
+<body>
+
+<h1>📡 Schedule Tracker Setup</h1>
+<p class="sub">Connect to your WiFi and configure the device</p>
+
+<div class="error-box" id="error-box"></div>
+
+<div class="field">
+  <label>WiFi Network (SSID)</label>
+  <input type="text" id="ssid" placeholder="Your network name" maxlength="32" autocomplete="off">
+</div>
+<div class="field">
+  <label>WiFi Password</label>
+  <input type="password" id="password" placeholder="••••••••••••" maxlength="63">
+</div>
+<div class="row">
+  <div class="field">
+    <label>Timezone</label>
+    <select id="timezone">
+      <option value="UTC0">UTC</option>
+      <option value="GMT0BST,M3.5.0/1,M10.5.0">London (GMT/BST)</option>
+      <option value="EST5EDT,M3.2.0,M11.1.0">New York (ET)</option>
+      <option value="CST6CDT,M3.2.0,M11.1.0">Chicago (CT)</option>
+      <option value="MST7MDT,M3.2.0,M11.1.0">Denver (MT)</option>
+      <option value="PST8PDT,M3.2.0,M11.1.0">Los Angeles (PT)</option>
+      <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Sydney (AEST)</option>
+      <option value="JST-9">Tokyo (JST)</option>
+      <option value="CET-1CEST,M3.5.0,M10.5.0/3">Berlin (CET)</option>
+      <option value="GST-4">Dubai (GST)</option>
+      <option value="IST-5:30">India (IST)</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Units</label>
+    <select id="units">
+      <option value="metric">°C / Metric</option>
+      <option value="imperial">°F / Imperial</option>
+    </select>
+  </div>
+</div>
+<div class="field">
+  <label>Weather City</label>
+  <input type="text" id="city" placeholder="e.g. London" maxlength="85">
+</div>
+<div class="field">
+  <label>OpenWeatherMap API Key</label>
+  <input type="text" id="owmkey" placeholder="Paste your 32-character API key"
+         maxlength="32" autocomplete="off" spellcheck="false">
+</div>
+
+<button class="btn" id="submit-btn" onclick="submit()">Save &amp; Connect →</button>
+<p class="hint">Device will reboot and connect to your WiFi network</p>
+
+<script>
+function validate() {
+  const ssid     = document.getElementById('ssid').value.trim();
+  const password = document.getElementById('password').value;
+  const city     = document.getElementById('city').value.trim();
+  const owmkey   = document.getElementById('owmkey').value.trim();
+  const errors   = [];
+
+  if (!ssid)
+    errors.push('WiFi network name is required.');
+  else if (ssid.length > 32)
+    errors.push('WiFi network name must be 32 characters or fewer.');
+  else if (ssid !== ssid.trim())
+    errors.push('WiFi network name cannot start or end with spaces.');
+
+  if (password.length > 0 && password.length < 8)
+    errors.push('WiFi password must be at least 8 characters (WPA2 minimum).');
+  if (password.length > 63)
+    errors.push('WiFi password must be 63 characters or fewer.');
+
+  if (!city)
+    errors.push('City is required for weather.');
+  else if (!/^[a-zA-Z\s\-'.]{2,85}$/.test(city))
+    errors.push('City name contains invalid characters.');
+
+  if (owmkey && !/^[a-f0-9]{32}$/.test(owmkey))
+    errors.push('OpenWeatherMap API key should be 32 hex characters — check you copied it fully.');
+
+  if (errors.length > 0) {
+    document.getElementById('error-box').innerHTML =
+      errors.map(e => `<div class="error-item">⚠ ${e}</div>`).join('');
+    document.getElementById('error-box').style.display = 'block';
+    return false;
+  }
+  document.getElementById('error-box').style.display = 'none';
+  return true;
+}
+
+async function submit() {
+  if (!validate()) return;
+
+  const btn = document.getElementById('submit-btn');
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  const payload = {
+    ssid:     document.getElementById('ssid').value.trim(),
+    password: document.getElementById('password').value,
+    timezone: document.getElementById('timezone').value,
+    city:     document.getElementById('city').value.trim(),
+    owmkey:   document.getElementById('owmkey').value.trim(),
+    metric:   document.getElementById('units').value === 'metric',
+  };
+
+  try {
+    const res  = await fetch('/save-setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      document.getElementById('error-box').innerHTML =
+        `<div class="error-item">⚠ ${data.error || 'Unknown error from device.'}</div>`;
+      document.getElementById('error-box').style.display = 'block';
+      btn.textContent = 'Save & Connect →';
+      btn.disabled = false;
+    } else {
+      if (data.warn === 'owmkey_suspect') {
+        btn.textContent = '✓ Saved (check API key) — rebooting…';
+      } else {
+        btn.textContent = '✓ Saved — rebooting device…';
+      }
+      // Device disconnects as it reboots — page goes offline naturally
+    }
+  } catch (e) {
+    // Connection dropped because device rebooted — that's expected
+    btn.textContent = '✓ Saved — device is connecting…';
+  }
+}
+
+</script>
+</body>
+</html>

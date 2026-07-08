@@ -110,3 +110,33 @@ void AudioManager::loop() {
   size_t bytesWritten = 0;
   i2s_write(I2S_PORT, buf, bytesRead, &bytesWritten, portMAX_DELAY);
 }
+
+// ── Touch beep ────────────────────────────────────────────────────────────────
+// Synthesises a pure square wave directly into a stack buffer and writes it
+// to the I2S DMA in one call. No file I/O, no heap allocation.
+// Does nothing if audio is muted (checked by the caller in main.cpp).
+void AudioManager::beep(uint16_t freq, uint16_t durationMs) {
+  // Reconfigure I2S clock for 16kHz — higher sample rate = cleaner beep
+  i2s_set_clk(I2S_PORT, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+
+  const uint32_t sampleRate  = 16000;
+  const uint32_t totalSamples= (sampleRate * durationMs) / 1000;
+  const uint32_t halfPeriod  = sampleRate / (2 * freq);  // samples per half-cycle
+
+  // Stack buffer — 16kHz * 18ms = 288 samples * 2 bytes = 576 bytes
+  // Safe on the stack; keep durationMs ≤ 50 to avoid overflow
+  const size_t bufSize = (totalSamples * sizeof(int16_t));
+  int16_t buf[totalSamples];
+
+  int16_t amplitude = 8000;  // ~25% of int16 max — loud enough, not distorted
+  for (uint32_t i = 0; i < totalSamples; i++) {
+    buf[i] = ((i / halfPeriod) % 2 == 0) ? amplitude : -amplitude;
+  }
+
+  size_t written = 0;
+  i2s_write(I2S_PORT, buf, bufSize, &written, pdMS_TO_TICKS(50));
+
+  // Restore to default 8kHz for WAV playback
+  i2s_set_clk(I2S_PORT, 8000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+  i2s_zero_dma_buffer(I2S_PORT);
+}

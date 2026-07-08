@@ -18,15 +18,21 @@ A compact, battery-powered schedule tracker built on the Seeed XIAO ESP32-C3 fea
    - [Config](#config)
    - [TaskScheduler](#taskscheduler)
    - [DisplayManager](#displaymanager)
+   - [ClothingAdvisor](#clothingadvisor)
+   - [BacklightManager](#backlightmanager)
    - [WebServer](#webserver)
    - [AudioManager](#audiomanager)
    - [BatteryMonitor](#batterymonitor)
    - [main.cpp](#maincpp)
-9. [Web Portal](#web-portal)
-10. [Schedule JSON Format](#schedule-json-format)
-11. [Audio File Preparation](#audio-file-preparation)
-12. [First Boot & Setup Flow](#first-boot--setup-flow)
-13. [Development Phases](#development-phases)
+9. [Screen Mockups](#screen-mockups)
+10. [Web Portal](#web-portal)
+    - [index.html — Live Dashboard](#data-indexhtml--live-dashboard-websocket)
+    - [Setup Portal Validation](#setup-portal-validation-datasetuphtml)
+    - [OWM Key Management](#owm-key-management-dataconfightml)
+11. [Schedule JSON Format](#schedule-json-format)
+12. [Audio File Preparation](#audio-file-preparation)
+13. [First Boot & Setup Flow](#first-boot--setup-flow)
+14. [Development Phases](#development-phases)
 
 ---
 
@@ -34,9 +40,13 @@ A compact, battery-powered schedule tracker built on the Seeed XIAO ESP32-C3 fea
 
 - **2.8" ILI9341 touch TFT** — 240×320 portrait display with XPT2046 resistive touch
 - **Android-style status bar** — WiFi arc signal strength, battery percentage, time, date
-- **Live weather** — OpenWeatherMap current conditions (temp, humidity, wind, description)
+- **Live weather** — OpenWeatherMap current conditions with offline cache — survives reboots and WiFi outages
+- **Clothing recommendations** — Tap the weather bar for a "What to Wear" overlay based on temp, wind, humidity, and conditions
 - **Grouped task scheduling** — Tasks organised into named groups (e.g. *Start of Day*, *Work Block*)
+- **Dial timer with emoji** — A 270° arc dial shows time remaining; a mood emoji (😊 → 😰 → 😱) bobs inside the dial and changes expression as urgency rises; arc colour transitions cyan → yellow → red
 - **Voice audio prompts** — I2S MAX98357A amplifier plays cues at task start, halfway, 1-minute warning, and completion
+- **Touch beep feedback** — Short I2S-generated tone on every touch event (no WAV file needed)
+- **Auto-dim backlight** — PWM-dimmed ILI9341 backlight fades after 60s of inactivity; wakes on touch
 - **Mute toggle** — Silence audio from touch or web portal; auto-unmute option
 - **Captive portal WiFi setup** — SoftAP on first boot, DNS redirect, web form for SSID/password/timezone/weather config
 - **WebSocket web dashboard** — Live status mirroring the physical display, accessible from any browser on the same network
@@ -176,7 +186,7 @@ GPIO 3               TFT Chip Select   TFT CS
 GPIO 4               TFT Data/Command  TFT DC
 GPIO 5               TFT Reset         TFT RST
 GPIO 6               Touch Chip Select Touch CS
-GPIO 7               Touch IRQ         Touch IRQ (optional)
+GPIO 7               TFT Backlight     TFT BL  (PWM via LEDC — auto-dim)
 
 GPIO 20 (I2S BCLK)   I2S Bit Clock     MAX98357A BCLK
 GPIO 21 (I2S LRCK)   I2S Word Select   MAX98357A LRCLK
@@ -188,6 +198,8 @@ GPIO 1  (ADC1_0)     Battery ADC       Voltage divider midpoint
 GND                  Ground            All grounds
 5V (via 5V pin)      Charge input      TP4056 OUT+ → XIAO 5V pin
 ```
+
+> **Note:** Touch IRQ (XPT2046 INT pin) is no longer assigned — polling via `getTouch()` is sufficient at 300ms debounce. GPIO 7 is reassigned from Touch IRQ to backlight PWM. If you want interrupt-driven touch, use a free GPIO and call `BacklightManager::instance().wake()` from the ISR.
 
 ### Battery Circuit
 
@@ -359,16 +371,17 @@ Every 5 seconds:
 ```
 schedule-tracker/
 ├── platformio.ini
+├── screens.html                   ← Interactive screen mockups (open in browser)
 ├── data/                          ← Uploaded to LittleFS
 │   ├── index.html                 ← Live dashboard (WebSocket client)
 │   ├── config.html                ← Schedule + device config editor
 │   ├── setup.html                 ← Captive portal first-run page
 │   ├── schedule.json              ← Task data (editable via portal)
 │   └── audio/
-│       ├── starting.raw           ← 8kHz 8-bit mono PCM
-│       ├── halfway.raw
-│       ├── onemin.raw
-│       └── done.raw
+│       ├── starting.wav           ← 8kHz 16-bit mono WAV
+│       ├── halfway.wav
+│       ├── onemin.wav
+│       └── done.wav
 └── src/
     ├── main.cpp
     ├── config/
@@ -376,7 +389,11 @@ schedule-tracker/
     │   └── Config.cpp
     ├── display/
     │   ├── DisplayManager.h
-    │   └── DisplayManager.cpp
+    │   ├── DisplayManager.cpp
+    │   ├── ClothingAdvisor.h      ← Weather-based clothing recommendation engine
+    │   ├── ClothingAdvisor.cpp
+    │   ├── BacklightManager.h     ← PWM auto-dim + wake on touch
+    │   └── BacklightManager.cpp
     ├── network/
     │   ├── WebServer.h
     │   └── WebServer.cpp
@@ -772,6 +789,7 @@ float TaskScheduler::progressPct() const {
 ```cpp
 #pragma once
 #include <TFT_eSPI.h>
+#include <vector>
 #include "../tasks/TaskScheduler.h"
 
 struct WeatherData {
@@ -781,6 +799,7 @@ struct WeatherData {
   float  windSpeed  = 0;
   String description;
   String icon;
+  String errorMsg;   // Set on fetch failure: "API key invalid", "City not found", etc.
   bool   valid = false;
 };
 
@@ -792,10 +811,11 @@ public:
   void begin();
   void update(struct tm* now);
   void setScreen(Screen s);
+  void showClothingOverlay();   // Blocks until tap or 8s timeout, then redraws
 
   WeatherData weather;
 
-  // Returns touch zone: -1=none, 0=main, 1=allTasks, 2=mute
+  // Returns touch zone: -1=none, 0=main, 1=allTasks, 2=mute, 3=back, 4=weather
   int pollTouch();
 
 private:
@@ -806,6 +826,7 @@ private:
   bool        _screenDirty = true;
   int         _scrollOffset = 0;    // For task list scrolling
   bool        _groupExpanded[16] = {};
+  float       _gaugeAnimT = 0.0f;   // Seconds elapsed — drives gauge bob and arc pulse
 
   // Drawing methods
   void _drawStatusBar(struct tm* now);
@@ -813,6 +834,20 @@ private:
   void _drawCurrentTask();
   void _drawNavBar();
   void _drawTaskList();
+  void _drawClothingOverlay(const std::vector<struct ClothingItem>& items);
+
+  // Bunny timeline animation — drawn above the progress bar track
+  // barX/barY/barW: progress bar geometry
+  // progressPct: 0–100
+  // remainingSec/totalSec: for speed scaling
+  void _drawBunny(int barX, int barY, int barW,
+                  float progressPct, int remainingSec, int totalSec);
+
+  // Dial timer — 270° arc ring with emoji inside
+  // cx=120, cy=174, r=64 for the 240×320 layout
+  void _drawDial(int cx, int cy, int r,
+                 float progressPct, int remainingSec, int totalSec,
+                 float urgency, uint32_t arcColor);
 
   // Widget helpers
   void _drawWifiArcs   (int cx, int cy, int rssi);
@@ -830,6 +865,8 @@ private:
   static constexpr uint32_t CLR_RED      = 0xF800;
   static constexpr uint32_t CLR_BAR_BG   = 0x39C7;
   static constexpr uint32_t CLR_STATUSBG = 0x0841;
+
+
 };
 ```
 
@@ -950,15 +987,35 @@ void DisplayManager::_drawStatusBar(struct tm* now) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Weather Row (y=20 to y=58)
+// Shows error messages for specific failure modes (bad key, bad city, etc.)
+// so the user knows to visit /config rather than just seeing a blank row.
 // ─────────────────────────────────────────────────────────────────────────────
 void DisplayManager::_drawWeatherRow() {
   _tft.fillRect(0, 20, 240, 38, CLR_CARD);
 
   if (!weather.valid) {
-    _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
+    _tft.setTextDatum(MC_DATUM);
     _tft.setTextSize(1);
-    _tft.setCursor(8, 32);
-    _tft.print("Weather unavailable");
+
+    if (weather.errorMsg == "API key invalid") {
+      _tft.setTextColor(CLR_RED, CLR_CARD);
+      _tft.drawString("Weather: invalid API key", 120, 28);
+      _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _tft.drawString("Fix key at /config", 120, 40);
+    } else if (weather.errorMsg == "City not found") {
+      _tft.setTextColor(CLR_RED, CLR_CARD);
+      _tft.drawString("Weather: city not found", 120, 28);
+      _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _tft.drawString("Fix city at /config", 120, 40);
+    } else if (!weather.errorMsg.isEmpty()) {
+      _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _tft.drawString(weather.errorMsg.c_str(), 120, 34);
+    } else {
+      _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _tft.drawString("Weather unavailable", 120, 34);
+    }
+
+    _tft.setTextDatum(TL_DATUM);
     return;
   }
 
@@ -983,10 +1040,22 @@ void DisplayManager::_drawWeatherRow() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Current Task Card (y=60 to y=258)
+// Current Task Card — dial layout
+//
+// Screen pixel budget (portrait 240×320):
+//   y=00–20:  Status bar
+//   y=20–58:  Weather row (tap → clothing overlay)
+//   y=58–74:  Group label  — size 1 (10px), centred, uppercase, dim
+//   y=84–104: Task name    — size 2 (16px bold), centred
+//   y=110–238: Dial arc    — r=64, cx=120, cy=174
+//             └─ Emoji centred inside arc (bob ±2px)
+//             └─ Time remaining below emoji
+//             └─ "of X min" sub-label
+//   y=240–268: Next task strip — height 28px, font size 1 (larger padding)
+//   y=268–320: Nav bar
 // ─────────────────────────────────────────────────────────────────────────────
 void DisplayManager::_drawCurrentTask() {
-  _tft.fillRect(0, 60, 240, 198, CLR_BG);
+  _tft.fillRect(0, 58, 240, 210, CLR_BG);
 
   auto& sched = TaskScheduler::instance();
   const Task* t = sched.currentTask();
@@ -1000,182 +1069,142 @@ void DisplayManager::_drawCurrentTask() {
     return;
   }
 
-  // Group label
+  const float urgency = (t->durationMin > 0)
+    ? 1.0f - ((float)sched.remainingSec() / (float)(t->durationMin * 60))
+    : 1.0f;
+
+  uint32_t arcColor;
+  if (urgency > 0.8f) {
+    arcColor = ((int)_gaugeAnimT % 2 == 0) ? CLR_RED : 0xA800;  // pulse
+  } else if (urgency > 0.5f) {
+    arcColor = CLR_YELLOW;
+  } else {
+    arcColor = CLR_ACCENT;
+  }
+
+  // ── Group label — size 1, centred, y=62 ──────────────────────────────────
   if (sched.currentGroup()) {
     _tft.setTextColor(CLR_SUBTEXT, CLR_BG);
     _tft.setTextSize(1);
-    _tft.setCursor(10, 68);
-    _tft.print(sched.currentGroup()->name.c_str());
+    _tft.setTextDatum(TC_DATUM);
+    _tft.drawString(sched.currentGroup()->name.c_str(), 120, 62);
   }
 
-  // Task name (large)
+  // ── Task name — size 2, centred, y=84 (22px gap below group) ─────────────
   _tft.setTextColor(CLR_TEXT, CLR_BG);
   _tft.setTextSize(2);
-  _tft.setCursor(10, 82);
-  _tft.print(t->name.substring(0, 16).c_str());
-
-  // Time remaining (large, right-aligned)
-  int rem  = sched.remainingSec();
-  int remM = rem / 60;
-  int remS = rem % 60;
-  char remBuf[8];
-  snprintf(remBuf, sizeof(remBuf), "%d:%02d", remM, remS);
-  _tft.setTextDatum(TR_DATUM);
-  _tft.setTextColor(CLR_ACCENT, CLR_BG);
-  _tft.setTextSize(2);
-  _tft.drawString(remBuf, 230, 82);
+  _tft.setTextDatum(TC_DATUM);
+  _tft.drawString(t->name.substring(0, 14).c_str(), 120, 84);
   _tft.setTextDatum(TL_DATUM);
 
-  // Progress bar
-  _drawProgressBar(10, 112, 220, 10, sched.progressPct(), CLR_ACCENT);
+  // ── Dial — cx=120, cy=174, r=64 ──────────────────────────────────────────
+  _drawDial(120, 174, 64,
+            sched.progressPct(), sched.remainingSec(), t->durationMin * 60,
+            urgency, arcColor);
 
-  // Progress percentage label
-  _tft.setTextSize(1);
-  _tft.setTextColor(CLR_SUBTEXT, CLR_BG);
-  _tft.setCursor(10, 128);
-  _tft.printf("%.0f%% complete", sched.progressPct());
-
-  // Duration info
-  _tft.setCursor(10, 142);
-  _tft.printf("Duration: %d min", t->durationMin);
-
-  // Next task
+  // ── Next task strip — y=240, height=28px ─────────────────────────────────
   const Task* next = sched.nextTask();
+  _tft.fillRect(0, 240, 240, 28, CLR_CARD);
+  _tft.drawFastHLine(0, 240, 240, CLR_SUBTEXT);
   if (next) {
-    _tft.fillRect(0, 220, 240, 40, CLR_CARD);
     _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
     _tft.setTextSize(1);
-    _tft.setCursor(10, 228);
-    _tft.print("NEXT UP");
+    _tft.setCursor(10, 251);
+    _tft.print("NEXT: ");
     _tft.setTextColor(CLR_TEXT, CLR_CARD);
-    _tft.setCursor(10, 240);
-    _tft.print(next->name.substring(0, 24).c_str());
+    _tft.print(next->name.substring(0, 18).c_str());
+    // Start time right-aligned
+    char ntBuf[8];
+    snprintf(ntBuf, sizeof(ntBuf), "%02d:%02d", next->startHour, next->startMin);
+    _tft.setTextDatum(TR_DATUM);
+    _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
+    _tft.drawString(ntBuf, 232, 251);
+    _tft.setTextDatum(TL_DATUM);
   }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Navigation Bar (y=260 to y=320)
+// Dial timer
+//
+// 270° arc ring (225°→495°) showing time remaining. Arc sweeps from 8-o'clock
+// clockwise. Colour: cyan (>50% left) → yellow (20–50%) → red pulsing (<20%).
+//
+// Inside the dial:
+//   - Mood emoji (😊/😰/😱) centred, slow bob ±2px at 1.6 rad/s
+//   - Time remaining in large bold text below emoji, coloured by urgency
+//   - "of X min" in dim grey below that
+//
+// cx=120, cy=174, r=64 fits exactly between task name (y=84) and
+// next-task strip (y=240) with 6px clear each side.
 // ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawNavBar() {
-  int y = 262;
-  _tft.drawFastHLine(0, y, 240, CLR_SUBTEXT);
-  _tft.fillRect(0,   y+1, 120, 58, CLR_CARD);
-  _tft.fillRect(120, y+1, 120, 58, CLR_CARD);
-  _tft.drawFastVLine(120, y, 58, CLR_SUBTEXT);
+void DisplayManager::_drawDial(int cx, int cy, int r,
+                                float progressPct, int remainingSec, int totalSec,
+                                float urgency, uint32_t arcColor) {
+  const int STROKE = 10;
+  const int r_arc  = r - STROKE / 2;
 
+  // ── Track ring ────────────────────────────────────────────────────────────
+  _tft.drawSmoothArc(cx, cy, r_arc, r_arc - STROKE,
+                     225, 495, CLR_GAUGE_BG, CLR_BG);
+
+  // ── Remaining arc ─────────────────────────────────────────────────────────
+  if (urgency < 1.0f) {
+    float endDeg = 225.0f + 270.0f * (1.0f - urgency);
+    _tft.drawSmoothArc(cx, cy, r_arc, r_arc - STROKE,
+                       225, (int)endDeg, arcColor, CLR_BG);
+  }
+
+  // ── Emoji — slow bob ±2px ─────────────────────────────────────────────────
+  int bobY = (int)(sinf(_gaugeAnimT * 1.6f) * 2.0f);
+
+  // ASCII fallback faces (replace with NotoEmoji VLW for real emoji — see note)
+  const char* face = (urgency > 0.8f) ? ":o"
+                   : (urgency > 0.5f) ? ":/"
+                                      : ":)";
   _tft.setTextDatum(MC_DATUM);
+  _tft.setTextSize(3);
+  _tft.setTextColor(arcColor, CLR_BG);
+  _tft.drawString(face, cx, cy - 14 + bobY);
+
+  // ── Time remaining ────────────────────────────────────────────────────────
+  int remM = remainingSec / 60;
+  int remS = remainingSec % 60;
+  char timeBuf[8];
+  snprintf(timeBuf, sizeof(timeBuf), "%d:%02d", remM, remS);
+  _tft.setTextSize(2);
+  _tft.setTextColor(arcColor, CLR_BG);
+  _tft.drawString(timeBuf, cx, cy + 16 + bobY);
+
+  // ── "of X min" ────────────────────────────────────────────────────────────
   _tft.setTextSize(1);
-
-  // All Tasks button
-  _tft.setTextColor(CLR_TEXT, CLR_CARD);
-  _tft.drawString("All Tasks", 60, y + 20);
-  _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
-  _tft.drawString("View schedule", 60, y + 34);
-
-  // Mute button
-  bool muted = Config::instance().data.muted;
-  _tft.setTextColor(muted ? CLR_RED : CLR_TEXT, CLR_CARD);
-  _tft.drawString(muted ? "Unmute" : "Mute", 180, y + 20);
-  _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
-  _tft.drawString(muted ? "Audio off" : "Audio on", 180, y + 34);
-
+  _tft.setTextColor(CLR_SUBTEXT, CLR_BG);
+  char ofBuf[12];
+  snprintf(ofBuf, sizeof(ofBuf), "of %d min", totalSec / 60);
+  _tft.drawString(ofBuf, cx, cy + 32);
   _tft.setTextDatum(TL_DATUM);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Task List Screen
+// Emoji VLW font upgrade path (NotoEmoji)
+//
+// ASCII faces (:) :/ :o) work with no extra files. For real 😊 😰 😱:
+//   1. Download NotoEmoji-Regular.ttf (fonts.google.com)
+//   2. Convert: Processing TFT_eSPI font tool, 22pt,
+//      codepoints U+1F60A U+1F630 U+1F631 → NotoEmoji22.vlw (~14KB)
+//   3. Add to data/ and upload via LittleFS
+//   4. In _drawDial(), replace the ASCII block with:
+//      _tft.loadFont("NotoEmoji22", LittleFS);
+//      const char* e = urgency > 0.8f ? "\xF0\x9F\x98\xB1"   // 😱
+//                     : urgency > 0.5f ? "\xF0\x9F\x98\xB0"  // 😰
+//                                      : "\xF0\x9F\x98\x8A"; // 😊
+//      _tft.setTextDatum(MC_DATUM);
+//      _tft.setTextColor(arcColor, CLR_BG);
+//      _tft.drawString(e, cx, cy - 14 + bobY);
+//      _tft.unloadFont();
 // ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawTaskList() {
-  _tft.fillScreen(CLR_BG);
 
-  // Header
-  _tft.fillRect(0, 0, 240, 30, CLR_STATUSBG);
-  _tft.setTextDatum(MC_DATUM);
-  _tft.setTextColor(CLR_TEXT, CLR_STATUSBG);
-  _tft.setTextSize(1);
-  _tft.drawString("All Tasks", 120, 15);
-  _tft.setTextDatum(TL_DATUM);
-  _tft.setTextColor(CLR_ACCENT, CLR_STATUSBG);
-  _tft.drawString("< Back", 8, 11);
-
-  auto& sched = TaskScheduler::instance();
-  int y = 36 - _scrollOffset;
-
-  for (int gi = 0; gi < (int)sched.groups.size(); gi++) {
-    auto& grp = sched.groups[gi];
-    if (y > 320) break;
-
-    // Group header row
-    if (y > 20) {
-      _tft.fillRect(0, y, 240, 24, CLR_CARD);
-      // Color accent bar
-      uint32_t c565 = ((grp.color & 0xF80000) >> 8) |
-                      ((grp.color & 0x00FC00) >> 5) |
-                      ((grp.color & 0x0000F8) >> 3);
-      _tft.fillRect(0, y, 4, 24, c565);
-      _tft.setTextColor(CLR_TEXT, CLR_CARD);
-      _tft.setTextSize(1);
-      _tft.setCursor(10, y + 8);
-      _tft.print(grp.name.c_str());
-      // Expand/collapse indicator
-      _tft.setTextColor(CLR_SUBTEXT, CLR_CARD);
-      _tft.setCursor(218, y + 8);
-      _tft.print(_groupExpanded[gi] ? "v" : ">");
-    }
-    y += 26;
-
-    if (!_groupExpanded[gi]) continue;
-
-    // Task rows
-    for (auto& task : grp.tasks) {
-      if (y > 320) break;
-      if (y > 20) {
-        bool isActive = (TaskScheduler::instance().currentTask() &&
-                         TaskScheduler::instance().currentTask()->id == task.id);
-
-        _tft.fillRect(0, y, 240, 22, isActive ? 0x0842 : CLR_BG);
-        if (isActive) {
-          _tft.fillRect(0, y, 3, 22, CLR_ACCENT);
-        }
-
-        // Status dot
-        uint32_t dotColor = task.completedToday ? CLR_GREEN :
-                            (isActive ? CLR_ACCENT : CLR_SUBTEXT);
-        _tft.fillCircle(16, y + 11, 4, dotColor);
-
-        // Task name
-        _tft.setTextColor(isActive ? CLR_ACCENT : CLR_TEXT,
-                          isActive ? 0x0842 : CLR_BG);
-        _tft.setTextSize(1);
-        _tft.setCursor(28, y + 7);
-        _tft.print(task.name.substring(0, 18).c_str());
-
-        // Start time + duration (right side)
-        char tbuf[12];
-        snprintf(tbuf, sizeof(tbuf), "%02d:%02d %dm",
-                 task.startHour, task.startMin, task.durationMin);
-        _tft.setTextColor(CLR_SUBTEXT, isActive ? 0x0842 : CLR_BG);
-        _tft.setTextDatum(TR_DATUM);
-        _tft.drawString(tbuf, 234, y + 7);
-        _tft.setTextDatum(TL_DATUM);
-      }
-      y += 24;
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Main update entry point
-// ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::update(struct tm* now) {
-  if (_screen == Screen::HOME) {
-    _drawStatusBar(now);
-    _drawWeatherRow();
-    _drawCurrentTask();
-    _drawNavBar();
-  } else {
-    _drawTaskList();
-  }
+// Legacy stub
+void DisplayManager::_drawBunny(int a, int b, int d, float e, int f, int g) {
+  (void)a;(void)b;(void)d;(void)e;(void)f;(void)g;
 }
 
 void DisplayManager::setScreen(Screen s) {
@@ -1185,7 +1214,8 @@ void DisplayManager::setScreen(Screen s) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Touch polling
-// Returns: -1=no touch, 0=main area, 1=All Tasks, 2=Mute, 3=Back (task list)
+// Returns: -1=no touch, 0=main area, 1=All Tasks, 2=Mute,
+//           3=Back (task list), 4=Weather row (clothing overlay)
 // ─────────────────────────────────────────────────────────────────────────────
 int DisplayManager::pollTouch() {
   uint16_t tx, ty;
@@ -1196,14 +1226,335 @@ int DisplayManager::pollTouch() {
     return 0;
   }
 
-  // HOME screen nav bar (y > 262)
-  if (ty > 262) {
+  // HOME screen zones
+  if (ty >= 20 && ty < 60) return 4;   // Weather row → clothing overlay
+  if (ty > 262) {                       // Nav bar
     return (tx < 120) ? 1 : 2;
   }
 
   return 0;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clothing overlay — draws over the full screen, blocks until tap or timeout,
+// then redraws the current screen.
+// ─────────────────────────────────────────────────────────────────────────────
+#include "ClothingAdvisor.h"
+
+void DisplayManager::showClothingOverlay() {
+  if (!weather.valid) return;  // No data — nothing to recommend
+
+  auto items = ClothingAdvisor::recommend(weather);
+  _drawClothingOverlay(items);
+
+  // Block until tap or 8-second auto-dismiss
+  uint32_t start = millis();
+  while (millis() - start < 8000) {
+    uint16_t tx, ty;
+    if (_tft.getTouch(&tx, &ty)) {
+      delay(200);  // debounce
+      break;
+    }
+    delay(50);
+  }
+
+  // Redraw home screen
+  time_t t = time(nullptr);
+  struct tm* tm_now = localtime(&t);
+  update(tm_now);
+}
+
+void DisplayManager::_drawClothingOverlay(const std::vector<ClothingItem>& items) {
+  _tft.fillRect(0, 0, 240, 320, CLR_BG);
+
+  // ── Header bar ───────────────────────────────────────────────────────────
+  _tft.fillRect(0, 0, 240, 28, CLR_STATUSBG);
+  _tft.setTextDatum(MC_DATUM);
+  _tft.setTextColor(CLR_TEXT, CLR_STATUSBG);
+  _tft.setTextSize(1);
+  _tft.drawString("What to Wear", 100, 10);
+
+  _tft.setTextDatum(TR_DATUM);
+  _tft.setTextColor(CLR_SUBTEXT, CLR_STATUSBG);
+  _tft.drawString("tap to close", 234, 10);
+
+  // ── Conditions summary ───────────────────────────────────────────────────
+  auto& cfg = Config::instance();
+  char summary[40];
+  snprintf(summary, sizeof(summary), "%.0f%s  %s",
+           weather.temp,
+           cfg.data.metricUnits ? "\xF7""C" : "\xF7""F",
+           weather.description.substring(0, 16).c_str());
+  _tft.setTextDatum(MC_DATUM);
+  _tft.setTextColor(CLR_SUBTEXT, CLR_BG);
+  _tft.setTextSize(1);
+  _tft.drawString(summary, 120, 40);
+  _tft.setTextDatum(TL_DATUM);
+
+  // ── Item list ────────────────────────────────────────────────────────────
+  int y        = 54;
+  int maxItems = min((int)items.size(), 7);
+
+  for (int i = 0; i < maxItems; i++) {
+    uint32_t rowBg = (i % 2 == 0) ? CLR_CARD : CLR_BG;
+    _tft.fillRect(0, y, 240, 30, rowBg);
+    _tft.fillRect(0, y, 3, 30, CLR_ACCENT);  // Left accent bar
+
+    // Icon (size 2 = ~16px)
+    _tft.setTextSize(2);
+    _tft.setTextColor(CLR_TEXT, rowBg);
+    _tft.setCursor(10, y + 7);
+    _tft.print(items[i].icon.c_str());
+
+    // Label
+    _tft.setTextSize(1);
+    _tft.setCursor(36, y + 11);
+    _tft.print(items[i].label.substring(0, 26).c_str());
+
+    y += 32;
+  }
+
+  // Overflow indicator
+  if ((int)items.size() > maxItems) {
+    _tft.setTextColor(CLR_SUBTEXT, CLR_BG);
+    _tft.setTextDatum(MC_DATUM);
+    _tft.drawString(
+      ("+" + String(items.size() - maxItems) + " more").c_str(),
+      120, y + 6);
+    _tft.setTextDatum(TL_DATUM);
+  }
+
+  // ── Dismiss hint ─────────────────────────────────────────────────────────
+  _tft.fillRect(0, 300, 240, 20, CLR_STATUSBG);
+  _tft.setTextDatum(MC_DATUM);
+  _tft.setTextColor(CLR_SUBTEXT, CLR_STATUSBG);
+  _tft.drawString("Tap anywhere to dismiss", 120, 310);
+  _tft.setTextDatum(TL_DATUM);
+}
 ```
+
+---
+
+### ClothingAdvisor
+
+Rule-based engine that derives clothing items from live weather data. Called by `DisplayManager::showClothingOverlay()` when the user taps the weather bar.
+
+**`src/display/ClothingAdvisor.h`**
+```cpp
+#pragma once
+#include <Arduino.h>
+#include <vector>
+
+// Forward declaration — avoid circular include with DisplayManager.h
+struct WeatherData;
+
+struct ClothingItem {
+  String icon;   // Emoji rendered as text on TFT
+  String label;
+};
+
+class ClothingAdvisor {
+public:
+  static std::vector<ClothingItem> recommend(const WeatherData& wx);
+
+private:
+  static bool _isRainy (const String& desc);
+  static bool _isSnowy (const String& desc);
+  static bool _isStormy(const String& desc);
+};
+```
+
+**`src/display/ClothingAdvisor.cpp`**
+```cpp
+#include "ClothingAdvisor.h"
+#include "DisplayManager.h"  // for WeatherData definition
+
+bool ClothingAdvisor::_isRainy(const String& desc) {
+  String d = desc; d.toLowerCase();
+  return d.indexOf("rain") >= 0 || d.indexOf("drizzle") >= 0 ||
+         d.indexOf("shower") >= 0;
+}
+
+bool ClothingAdvisor::_isSnowy(const String& desc) {
+  String d = desc; d.toLowerCase();
+  return d.indexOf("snow") >= 0 || d.indexOf("sleet") >= 0 ||
+         d.indexOf("blizzard") >= 0;
+}
+
+bool ClothingAdvisor::_isStormy(const String& desc) {
+  String d = desc; d.toLowerCase();
+  return d.indexOf("storm") >= 0 || d.indexOf("thunder") >= 0;
+}
+
+std::vector<ClothingItem> ClothingAdvisor::recommend(const WeatherData& wx) {
+  std::vector<ClothingItem> items;
+  float temp  = wx.temp;       // Metric °C; caller ensures correct units
+  float wind  = wx.windSpeed;  // km/h
+  bool  rainy = _isRainy(wx.description);
+  bool  snowy = _isSnowy(wx.description);
+  bool  stormy= _isStormy(wx.description);
+
+  // ── Top layer ────────────────────────────────────────────────────────────
+  if (snowy || temp < 0)   items.push_back({"🧥", "Heavy coat"});
+  else if (temp < 8)       items.push_back({"🧥", "Winter coat"});
+  else if (temp < 14)      items.push_back({"🧣", "Jacket + scarf"});
+  else if (temp < 18)      items.push_back({"👕", "Light jacket"});
+  else if (temp < 24)      items.push_back({"👕", "T-shirt / shirt"});
+  else                     items.push_back({"👕", "Light top"});
+
+  // ── Bottom layer ─────────────────────────────────────────────────────────
+  if (temp < 8 || snowy)   items.push_back({"👖", "Thermal trousers"});
+  else if (temp < 18)      items.push_back({"👖", "Trousers / jeans"});
+  else                     items.push_back({"🩳", "Shorts / light trousers"});
+
+  // ── Footwear ─────────────────────────────────────────────────────────────
+  if (snowy || temp < 2)       items.push_back({"🥾", "Winter boots"});
+  else if (rainy || stormy)    items.push_back({"🥾", "Waterproof shoes"});
+  else if (temp > 22)          items.push_back({"👟", "Trainers / sandals"});
+  else                         items.push_back({"👟", "Trainers"});
+
+  // ── Rain gear ────────────────────────────────────────────────────────────
+  if (stormy)                  items.push_back({"⛈",  "Stay indoors if possible"});
+  else if (rainy)              items.push_back({"☂️", "Umbrella"});
+
+  // ── Wind chill ───────────────────────────────────────────────────────────
+  if (wind > 30 && temp < 15)  items.push_back({"🧣", "Scarf / windbreaker"});
+  if (wind > 20 && temp < 10)  items.push_back({"🧤", "Gloves"});
+
+  // ── Sun ──────────────────────────────────────────────────────────────────
+  if (temp > 24)               items.push_back({"🕶️", "Sunglasses"});
+  if (temp > 28)               items.push_back({"🧴", "Sunscreen"});
+
+  // ── Humidity ─────────────────────────────────────────────────────────────
+  if (wx.humidity > 80 && temp > 22)
+                               items.push_back({"💧", "Stay hydrated"});
+
+  return items;
+}
+```
+
+**Recommendation logic summary:**
+
+| Condition | Items added |
+|-----------|-------------|
+| temp < 0 / snow | Heavy coat, thermal trousers, winter boots |
+| temp 0–8 | Winter coat, trousers/jeans, trainers |
+| temp 8–14 | Jacket + scarf |
+| temp 14–18 | Light jacket |
+| temp 18–24 | T-shirt, trousers or shorts |
+| temp > 24 | Light top, shorts, sunglasses |
+| temp > 28 | + Sunscreen |
+| rain / drizzle | Waterproof shoes, umbrella |
+| storm / thunder | "Stay indoors if possible" |
+| wind > 30 km/h + cold | Scarf / windbreaker |
+| wind > 20 km/h + very cold | + Gloves |
+| humidity > 80% + hot | "Stay hydrated" |
+
+---
+
+### BacklightManager
+
+Controls the ILI9341 backlight via PWM. Auto-dims after a configurable idle timeout and wakes instantly on touch. `BacklightManager::wake()` is called from the touch handler in `main.cpp` — no extra logic needed at the call site.
+
+**Hardware:** Connect the TFT's `BL` (backlight) pin to **GPIO 7** (or any PWM-capable GPIO not already used). The ILI9341 backlight accepts 3.3V PWM directly — no transistor needed at these current levels. If brightness feels weak, add a small NPN transistor (2N2222 or similar) driven from the GPIO.
+
+**`src/display/BacklightManager.h`**
+```cpp
+#pragma once
+#include <Arduino.h>
+
+class BacklightManager {
+public:
+  static BacklightManager& instance();
+
+  void begin(int pin, uint8_t fullBrightness = 255,
+             uint32_t dimAfterMs = 60000,
+             uint8_t  dimBrightness = 30);
+
+  void wake();          // Call on any touch event — resets idle timer, full brightness
+  void tick();          // Call every loop() — handles fade timing
+
+  void setBrightness(uint8_t val);   // 0=off, 255=full
+  bool isDimmed() const { return _dimmed; }
+
+private:
+  BacklightManager() {}
+
+  int      _pin            = -1;
+  uint8_t  _fullBrightness = 255;
+  uint8_t  _dimBrightness  = 30;
+  uint32_t _dimAfterMs     = 60000;
+  uint32_t _lastActivity   = 0;
+  bool     _dimmed         = false;
+  uint8_t  _current        = 255;
+
+  static constexpr int  PWM_CHANNEL = 0;   // LEDC channel — don't clash with others
+  static constexpr int  PWM_FREQ    = 5000; // Hz — above audible range
+  static constexpr int  PWM_RES     = 8;    // bits — 0–255
+};
+```
+
+**`src/display/BacklightManager.cpp`**
+```cpp
+#include "BacklightManager.h"
+
+BacklightManager& BacklightManager::instance() {
+  static BacklightManager inst;
+  return inst;
+}
+
+void BacklightManager::begin(int pin, uint8_t fullBrightness,
+                              uint32_t dimAfterMs, uint8_t dimBrightness) {
+  _pin            = pin;
+  _fullBrightness = fullBrightness;
+  _dimAfterMs     = dimAfterMs;
+  _dimBrightness  = dimBrightness;
+  _lastActivity   = millis();
+
+  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RES);
+  ledcAttachPin(_pin, PWM_CHANNEL);
+  setBrightness(_fullBrightness);
+
+  Serial.printf("[Backlight] Init on GPIO %d, dim after %lums\n", _pin, _dimAfterMs);
+}
+
+void BacklightManager::setBrightness(uint8_t val) {
+  _current = val;
+  ledcWrite(PWM_CHANNEL, val);
+}
+
+void BacklightManager::wake() {
+  _lastActivity = millis();
+  if (_dimmed) {
+    _dimmed = false;
+    setBrightness(_fullBrightness);
+    Serial.println("[Backlight] Wake");
+  }
+}
+
+void BacklightManager::tick() {
+  if (_dimmed) return;  // Already dimmed — nothing to do until wake()
+
+  uint32_t idle = millis() - _lastActivity;
+
+  if (idle >= _dimAfterMs) {
+    // Smooth fade — step down 5 units every tick until dim level reached
+    if (_current > _dimBrightness) {
+      uint8_t next = (_current > _dimBrightness + 5)
+                     ? _current - 5
+                     : _dimBrightness;
+      setBrightness(next);
+    } else {
+      _dimmed = true;
+      Serial.println("[Backlight] Dimmed");
+    }
+  }
+}
+```
+
+> **Wiring:** `TFT BL pin → GPIO 7`. The ILI9341's backlight LED draws ~60mA at full brightness — within the ESP32-C3 GPIO source limit (40mA per pin). If you want full 255-level brightness without a current drop, wire through a 2N2222 NPN transistor: ESP32 GPIO → 1kΩ → transistor base; collector → TFT BL; emitter → GND.
+>
+> **Dim timeout** is configurable — default 60 seconds. Set a shorter value (e.g. 30s) in the web config for better battery life overnight.
 
 ---
 
@@ -1301,12 +1652,29 @@ void AppWebServer::_setupRoutes() {
   // ── GET /api/config ────────────────────────────────────────────────────────
   _server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest* req) {
     auto& cfg = Config::instance();
+    auto& wx  = DisplayManager::instance().weather;
     JsonDocument doc;
     doc["timezone"] = cfg.data.timezone;
     doc["city"]     = cfg.data.city;
     doc["metric"]   = cfg.data.metricUnits;
     doc["muted"]    = cfg.data.muted;
-    // Never expose owmApiKey over HTTP for basic security
+
+    // Expose whether a key exists and its last 6 chars so the UI can show
+    // a masked hint (e.g. "…a3f92c") without putting the full key in the page.
+    // The full key is never sent over HTTP.
+    if (!cfg.data.owmApiKey.isEmpty()) {
+      doc["owmkey_set"]  = true;
+      doc["owmkey_hint"] = "…" + cfg.data.owmApiKey.substring(
+                             cfg.data.owmApiKey.length() - 6);
+    } else {
+      doc["owmkey_set"]  = false;
+      doc["owmkey_hint"] = "";
+    }
+
+    // Expose current weather error so the UI can highlight the key field
+    // when the key has been revoked or the city name is wrong.
+    doc["weather_error"] = wx.errorMsg;
+
     String out;
     serializeJson(doc, out);
     req->send(200, "application/json", out);
@@ -1320,15 +1688,48 @@ void AppWebServer::_setupRoutes() {
       JsonDocument doc;
       deserializeJson(doc, data, len);
       auto& cfg = Config::instance();
+
       if (doc["timezone"].is<String>()) {
         cfg.data.timezone = doc["timezone"].as<String>();
         setenv("TZ", cfg.data.timezone.c_str(), 1);
         tzset();
       }
-      if (doc["city"].is<String>())   cfg.data.city        = doc["city"].as<String>();
-      if (doc["owmkey"].is<String>()) cfg.data.owmApiKey   = doc["owmkey"].as<String>();
-      if (doc["metric"].is<bool>())   cfg.data.metricUnits = doc["metric"].as<bool>();
+      if (doc["city"].is<String>()) {
+        String newCity = doc["city"].as<String>();
+        newCity.trim();
+        if (!newCity.isEmpty()) cfg.data.city = newCity;
+      }
+      if (doc["metric"].is<bool>()) cfg.data.metricUnits = doc["metric"].as<bool>();
+
+      // Only overwrite the OWM key if a non-empty value was submitted.
+      // An absent or empty "owmkey" field means "keep the existing key" —
+      // this prevents a blank config save from accidentally wiping a working key.
+      bool keyChanged = false;
+      if (doc["owmkey"].is<String>()) {
+        String newKey = doc["owmkey"].as<String>();
+        newKey.trim();
+        if (!newKey.isEmpty()) {
+          cfg.data.owmApiKey = newKey;
+          keyChanged = true;
+        }
+      }
+
       cfg.save();
+
+      // If city or key changed, reset weather backoff so a fetch is
+      // attempted immediately on the next loop iteration.
+      if (keyChanged || doc["city"].is<String>()) {
+        extern WxState  wxState;
+        extern uint32_t wxBackoffUntil;
+        extern uint32_t lastWxFetch;
+        wxState        = WxState::OK;
+        wxBackoffUntil = 0;
+        lastWxFetch    = 0;
+
+        // Clear any existing error message so the display stops showing it
+        DisplayManager::instance().weather.errorMsg = "";
+      }
+
       req->send(200, "application/json", "{\"ok\":true}");
     }
   );
@@ -1348,17 +1749,68 @@ void AppWebServer::_setupRoutes() {
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t) {
       JsonDocument doc;
-      deserializeJson(doc, data, len);
+      if (deserializeJson(doc, data, len)) {
+        req->send(400, "application/json", "{\"error\":\"invalid_json\"}");
+        return;
+      }
+
+      // ── SSID ──────────────────────────────────────────────────────────────
+      String ssid = doc["ssid"] | "";
+      ssid.trim();
+      if (ssid.isEmpty()) {
+        req->send(400, "application/json", "{\"error\":\"ssid_required\"}");
+        return;
+      }
+      if (ssid.length() > 32) {
+        req->send(400, "application/json", "{\"error\":\"ssid_too_long\"}");
+        return;
+      }
+
+      // ── Password ──────────────────────────────────────────────────────────
+      String password = doc["password"] | "";
+      if (password.length() > 0 && password.length() < 8) {
+        req->send(400, "application/json", "{\"error\":\"password_too_short\"}");
+        return;
+      }
+      if (password.length() > 63) {
+        req->send(400, "application/json", "{\"error\":\"password_too_long\"}");
+        return;
+      }
+
+      // ── Timezone ──────────────────────────────────────────────────────────
+      String tz = doc["timezone"] | "UTC0";
+      if (tz.isEmpty() || tz.length() > 64) tz = "UTC0";
+
+      // ── City ──────────────────────────────────────────────────────────────
+      String city = doc["city"] | "London";
+      city.trim();
+      if (city.isEmpty()) city = "London";
+      if (city.length() > 85) city = city.substring(0, 85);
+
+      // ── OWM key (optional) ────────────────────────────────────────────────
+      // Accept empty (user skips weather for now) or exactly 32 hex chars.
+      // If malformed but non-empty, save it with a warning — user can fix
+      // later in /config without having to redo the whole WiFi setup.
+      String owmkey = doc["owmkey"] | "";
+      owmkey.trim();
+      bool owmSuspect = (!owmkey.isEmpty() && owmkey.length() != 32);
+
+      // ── All valid — save and reboot ───────────────────────────────────────
       auto& cfg = Config::instance();
-      cfg.data.wifiSSID     = doc["ssid"]     | "";
-      cfg.data.wifiPassword = doc["password"] | "";
-      cfg.data.timezone     = doc["timezone"] | "UTC0";
-      cfg.data.city         = doc["city"]     | "London";
-      cfg.data.owmApiKey    = doc["owmkey"]   | "";
-      cfg.data.metricUnits  = doc["metric"]   | true;
+      cfg.data.wifiSSID     = ssid;
+      cfg.data.wifiPassword = password;
+      cfg.data.timezone     = tz;
+      cfg.data.city         = city;
+      cfg.data.owmApiKey    = owmkey;
+      cfg.data.metricUnits  = doc["metric"] | true;
       cfg.save();
-      req->send(200, "application/json", "{\"ok\":true,\"msg\":\"Saved. Rebooting...\"}");
-      delay(1000);
+
+      String resp = owmSuspect
+        ? "{\"ok\":true,\"warn\":\"owmkey_suspect\",\"msg\":\"Saved. Rebooting...\"}"
+        : "{\"ok\":true,\"msg\":\"Saved. Rebooting...\"}";
+
+      req->send(200, "application/json", resp);
+      delay(800);
       ESP.restart();
     }
   );
@@ -1409,6 +1861,9 @@ String AppWebServer::_buildStatusJson() {
     doc["weather"]["humid"] = wx.humidity;
     doc["weather"]["wind"]  = wx.windSpeed;
   }
+  // Always emit weather_error — empty string means no error.
+  // Web dashboard uses this to show a warning banner with a /config link.
+  doc["weather_error"] = wx.errorMsg;
 
   String out;
   serializeJson(doc, out);
@@ -1488,6 +1943,12 @@ public:
   void stop();
   void loop();                  // Call every loop() iteration
   bool isPlaying() const { return _playing; }
+
+  // Touch feedback — generates a short tone directly into the I2S DMA buffer.
+  // Non-blocking: fills one DMA buffer worth of samples and returns immediately.
+  // freq: tone frequency in Hz (default 1200Hz — crisp without being harsh)
+  // durationMs: tone length in milliseconds (default 18ms)
+  void beep(uint16_t freq = 1200, uint16_t durationMs = 18);
 
 private:
   AudioManager() {}
@@ -1621,6 +2082,36 @@ void AudioManager::loop() {
   size_t bytesWritten = 0;
   i2s_write(I2S_PORT, buf, bytesRead, &bytesWritten, portMAX_DELAY);
 }
+
+// ── Touch beep ────────────────────────────────────────────────────────────────
+// Synthesises a pure square wave directly into a stack buffer and writes it
+// to the I2S DMA in one call. No file I/O, no heap allocation.
+// Does nothing if audio is muted (checked by the caller in main.cpp).
+void AudioManager::beep(uint16_t freq, uint16_t durationMs) {
+  // Reconfigure I2S clock for 16kHz — higher sample rate = cleaner beep
+  i2s_set_clk(I2S_PORT, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+
+  const uint32_t sampleRate  = 16000;
+  const uint32_t totalSamples= (sampleRate * durationMs) / 1000;
+  const uint32_t halfPeriod  = sampleRate / (2 * freq);  // samples per half-cycle
+
+  // Stack buffer — 16kHz * 18ms = 288 samples * 2 bytes = 576 bytes
+  // Safe on the stack; keep durationMs ≤ 50 to avoid overflow
+  const size_t bufSize = (totalSamples * sizeof(int16_t));
+  int16_t buf[totalSamples];
+
+  int16_t amplitude = 8000;  // ~25% of int16 max — loud enough, not distorted
+  for (uint32_t i = 0; i < totalSamples; i++) {
+    buf[i] = ((i / halfPeriod) % 2 == 0) ? amplitude : -amplitude;
+  }
+
+  size_t written = 0;
+  i2s_write(I2S_PORT, buf, bufSize, &written, pdMS_TO_TICKS(50));
+
+  // Restore to default 8kHz for WAV playback
+  i2s_set_clk(I2S_PORT, 8000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+  i2s_zero_dma_buffer(I2S_PORT);
+}
 ```
 
 > **Why no ESP8266Audio?** The `earlephilhower/ESP8266Audio` library includes `AudioGeneratorMIDI` which has compile-time dependencies that fail on the ESP32-C3's RISC-V core. Removing it entirely and using `driver/i2s.h` directly avoids the issue — the I2S driver ships with the `espressif32` platform and needs no extra `lib_deps` entry.
@@ -1723,6 +2214,7 @@ void BatteryMonitor::update() {
 
 #include "config/Config.h"
 #include "display/DisplayManager.h"
+#include "display/BacklightManager.h"
 #include "network/WebServer.h"
 #include "tasks/TaskScheduler.h"
 #include "audio/AudioManager.h"
@@ -1737,12 +2229,88 @@ uint32_t lastWxFetch    = 0;
 uint32_t lastWsBcast    = 0;
 uint32_t lastBatUpdate  = 0;
 
+// ─── Weather error state ──────────────────────────────────────────────────────
+enum class WxState { OK, BAD_KEY, BAD_CITY, RATE_LIMITED, SERVER_ERROR };
+WxState  wxState        = WxState::OK;
+uint32_t wxBackoffUntil = 0;
+
+// ─── Weather cache ────────────────────────────────────────────────────────────
+// Persists the last successful fetch to LittleFS so the display shows real data
+// immediately on boot, even before WiFi connects or the first fetch completes.
+// Format: JSON with all WeatherData fields + a Unix timestamp.
+static constexpr const char* WX_CACHE_PATH = "/weather_cache.json";
+
+void saveWeatherCache() {
+  auto& wx = DisplayManager::instance().weather;
+  if (!wx.valid) return;
+
+  JsonDocument doc;
+  doc["temp"]        = wx.temp;
+  doc["feelsLike"]   = wx.feelsLike;
+  doc["humidity"]    = wx.humidity;
+  doc["windSpeed"]   = wx.windSpeed;
+  doc["description"] = wx.description;
+  doc["icon"]        = wx.icon;
+  doc["cachedAt"]    = (uint32_t)time(nullptr);  // Unix timestamp
+
+  File f = LittleFS.open(WX_CACHE_PATH, "w");
+  if (f) {
+    serializeJson(doc, f);
+    f.close();
+    Serial.println("[Weather] Cache saved");
+  }
+}
+
+void loadWeatherCache() {
+  File f = LittleFS.open(WX_CACHE_PATH, "r");
+  if (!f) {
+    Serial.println("[Weather] No cache file");
+    return;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, f)) { f.close(); return; }
+  f.close();
+
+  auto& wx = DisplayManager::instance().weather;
+  wx.temp        = doc["temp"]        | 0.0f;
+  wx.feelsLike   = doc["feelsLike"]   | 0.0f;
+  wx.humidity    = doc["humidity"]    | 0;
+  wx.windSpeed   = doc["windSpeed"]   | 0.0f;
+  wx.description = doc["description"] | String("Cached");
+  wx.icon        = doc["icon"]        | String("01d");
+  wx.valid       = true;
+  wx.errorMsg    = "";
+
+  // Calculate how stale the cache is
+  uint32_t cachedAt  = doc["cachedAt"] | 0;
+  uint32_t nowUnix   = (uint32_t)time(nullptr);
+  uint32_t ageMin    = (nowUnix > cachedAt) ? (nowUnix - cachedAt) / 60 : 0;
+
+  Serial.printf("[Weather] Cache loaded — %u min old: %.1f° %s\n",
+                ageMin, wx.temp, wx.description.c_str());
+
+  // If cache is older than 4 hours, mark valid but flag it as stale so
+  // the display shows a subtle "last updated Xh ago" note
+  if (ageMin > 240) {
+    wx.errorMsg = "Cached " + String(ageMin / 60) + "h ago";
+  }
+}
+
 // ─── Weather ─────────────────────────────────────────────────────────────────
 void fetchWeather() {
   auto& cfg = Config::instance();
   auto& wx  = DisplayManager::instance().weather;
 
-  if (cfg.data.owmApiKey.isEmpty() || cfg.data.city.isEmpty()) return;
+  // Skip if we're in a backoff window
+  if (millis() < wxBackoffUntil) return;
+
+  // Skip if key or city is missing — not an error, just not configured yet
+  if (cfg.data.owmApiKey.isEmpty() || cfg.data.city.isEmpty()) {
+    wx.valid    = false;
+    wx.errorMsg = "";
+    return;
+  }
 
   HTTPClient http;
   String units = cfg.data.metricUnits ? "metric" : "imperial";
@@ -1754,22 +2322,71 @@ void fetchWeather() {
   http.setTimeout(8000);
   int code = http.GET();
 
-  if (code == 200) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, http.getStream());
-    if (!err) {
-      wx.temp        = doc["main"]["temp"].as<float>();
-      wx.feelsLike   = doc["main"]["feels_like"].as<float>();
-      wx.humidity    = doc["main"]["humidity"].as<int>();
-      wx.windSpeed   = doc["wind"]["speed"].as<float>();
-      wx.description = doc["weather"][0]["description"].as<String>();
-      wx.icon        = doc["weather"][0]["icon"].as<String>();
-      wx.valid       = true;
-      Serial.printf("[Weather] %.1f°  %s\n", wx.temp, wx.description.c_str());
+  Serial.printf("[Weather] HTTP %d\n", code);
+
+  switch (code) {
+    case 200: {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, http.getStream());
+      if (!err) {
+        wx.temp        = doc["main"]["temp"].as<float>();
+        wx.feelsLike   = doc["main"]["feels_like"].as<float>();
+        wx.humidity    = doc["main"]["humidity"].as<int>();
+        wx.windSpeed   = doc["wind"]["speed"].as<float>();
+        wx.description = doc["weather"][0]["description"].as<String>();
+        wx.icon        = doc["weather"][0]["icon"].as<String>();
+        wx.valid       = true;
+        wx.errorMsg    = "";
+        wxState        = WxState::OK;
+        wxBackoffUntil = 0;
+        Serial.printf("[Weather] OK: %.1f° %s\n", wx.temp, wx.description.c_str());
+        saveWeatherCache();  // Persist to flash for next boot
+      }
+      break;
     }
-  } else {
-    Serial.printf("[Weather] HTTP error: %d\n", code);
+
+    case 401:
+      // Key invalid or revoked — stop retrying until user fixes key in /config
+      wx.valid       = false;
+      wx.errorMsg    = "API key invalid";
+      wxState        = WxState::BAD_KEY;
+      wxBackoffUntil = UINT32_MAX;  // Never auto-retry
+      Serial.println("[Weather] 401 — API key invalid or revoked. Fix in /config");
+      break;
+
+    case 404:
+      // City not found — stop retrying until user fixes city in /config
+      wx.valid       = false;
+      wx.errorMsg    = "City not found";
+      wxState        = WxState::BAD_CITY;
+      wxBackoffUntil = UINT32_MAX;  // Never auto-retry
+      Serial.println("[Weather] 404 — City not found. Fix in /config");
+      break;
+
+    case 429:
+      // Free tier rate limit — back off 60 minutes (shouldn't happen at 20-min intervals)
+      wx.errorMsg    = "Rate limited";
+      wxState        = WxState::RATE_LIMITED;
+      wxBackoffUntil = millis() + 60UL * 60 * 1000;
+      Serial.println("[Weather] 429 — Rate limited. Backing off 60 min");
+      break;
+
+    default:
+      if (code >= 500) {
+        // OWM server error — back off 10 minutes
+        wx.errorMsg    = "Weather service error";
+        wxState        = WxState::SERVER_ERROR;
+        wxBackoffUntil = millis() + 10UL * 60 * 1000;
+        Serial.printf("[Weather] %d — Server error. Backing off 10 min\n", code);
+      } else if (code < 0) {
+        // Connection failed (WiFi down) — back off 2 minutes, don't clear valid data
+        wx.errorMsg    = "No connection";
+        wxBackoffUntil = millis() + 2UL * 60 * 1000;
+        Serial.println("[Weather] Connection failed. Backing off 2 min");
+      }
+      break;
   }
+
   http.end();
 }
 
@@ -1874,6 +2491,11 @@ void setup() {
   BatteryMonitor::instance().begin(/*adcPin=*/1);
   DisplayManager::instance().begin();
   AudioManager::instance().begin();
+  BacklightManager::instance().begin(/*pin=*/7, /*fullBrightness=*/255,
+                                     /*dimAfterMs=*/60000, /*dimBrightness=*/30);
+
+  // Load weather cache before WiFi connects so display shows data immediately
+  loadWeatherCache();
 
   // Load schedule
   TaskScheduler::instance().loadFromFile();
@@ -1923,10 +2545,16 @@ void loop() {
   }
 
   // ── Weather refresh every 20 minutes ───────────────────────────────────────
+  // fetchWeather() internally checks wxBackoffUntil — for permanent errors
+  // (bad key, bad city) it will no-op until the user fixes config and the
+  // POST /api/config handler resets wxBackoffUntil to 0.
   if (!apMode && now_ms - lastWxFetch >= 20UL * 60 * 1000) {
     lastWxFetch = now_ms;
     fetchWeather();
   }
+
+  // ── Backlight auto-dim ─────────────────────────────────────────────────────
+  BacklightManager::instance().tick();
 
   // ── Touch input ────────────────────────────────────────────────────────────
   static uint32_t lastTouch = 0;
@@ -1934,6 +2562,15 @@ void loop() {
     int zone = DisplayManager::instance().pollTouch();
     if (zone >= 0) {
       lastTouch = now_ms;
+
+      // Wake backlight on any touch — do this first so feedback feels instant
+      BacklightManager::instance().wake();
+
+      // Touch beep (skip if muted)
+      if (!Config::instance().data.muted) {
+        AudioManager::instance().beep(1200, 18);
+      }
+
       switch (zone) {
         case 1:  // All Tasks
           DisplayManager::instance().setScreen(Screen::TASK_LIST);
@@ -1949,6 +2586,9 @@ void loop() {
         case 3:  // Back (from task list)
           DisplayManager::instance().setScreen(Screen::HOME);
           break;
+        case 4:  // Weather row — show clothing overlay
+          DisplayManager::instance().showClothingOverlay();
+          break;
       }
     }
   }
@@ -1957,6 +2597,51 @@ void loop() {
   AudioManager::instance().loop();
 }
 ```
+
+---
+
+## Screen Mockups
+
+A companion file `screens.html` renders all device and web portal screens as interactive HTML mockups at exact pixel dimensions, with tab navigation between states. Open it directly in a browser — no server needed.
+
+```
+screens.html    ← open in any browser
+```
+
+### Screens Included
+
+| Tab | What it shows |
+|-----|---------------|
+| **Home — Active Task** | Status bar, weather row, group label, task name, 270° dial arc with 😊 emoji bobbing inside, time remaining + "of X min", next task strip |
+| **Home — Sprint Mode** | <20% remaining — arc pulses red, emoji switches to 😱 |
+| **Auto-Dimmed** | BacklightManager has faded to brightness 30/255 after 60s idle — ghost clock at low opacity, "tap to wake" hint |
+| **Home — Idle** | No active task; shows next upcoming task name and time until it starts |
+| **Home — Muted** | Red MUTED badge, nav mute turns red, battery yellow, dial arc yellow with 😰 |
+| **Home — Weather Error** | Weather row turns red with "invalid API key / Fix at /config" — task and bunny continue normally |
+| **Home — Stale Cache** | Weather loaded from cache (>4h old) — row dims with amber "📦 Cached 5h ago" note, timeline continues normally |
+| **Clothing Overlay** | Full-screen "What to Wear" overlay triggered by tapping the weather row |
+| **All Tasks** | Scrollable grouped list — green dot = completed, cyan highlight = active, collapsed groups |
+| **Captive Portal (device)** | What the physical display shows on first boot in AP mode |
+| **Web Dashboard** | Browser live dashboard with WebSocket status indicator and weather error banner element |
+| **Web Config** | Schedule editor showing OWM key masked hint (`…a3f92c · active`) with Replace button |
+| **Web Setup Portal** | First-run form at `192.168.4.1` for WiFi + timezone + weather config |
+
+### Colour Palette
+
+All mockup colours are derived directly from the firmware's RGB565 constants in `DisplayManager.h`:
+
+| Variable | Hex | Usage |
+|----------|-----|-------|
+| `CLR_BG` | `#101828` | Screen background |
+| `CLR_CARD` | `#1a2235` | Card / weather row background |
+| `CLR_STATUSBG` | `#0d1420` | Status bar background |
+| `CLR_ACCENT` | `#00c8ff` | Cyan — progress bar, active task, WiFi arcs |
+| `CLR_TEXT` | `#e8f0fe` | Primary text |
+| `CLR_SUBTEXT` | `#6b7fa3` | Secondary / dim text |
+| `CLR_GREEN` | `#34d97b` | Battery full, completed task dot |
+| `CLR_YELLOW` | `#f5c542` | Battery mid (20–50%) |
+| `CLR_RED` | `#f25c5c` | Battery low, mute active, weather error |
+| `CLR_BAR_BG` | `#243047` | Progress bar track |
 
 ---
 
@@ -2011,11 +2696,31 @@ void loop() {
     height: 100%; border-radius: 1px; transition: width 0.5s, background 0.5s;
   }
 
-  .weather-card {
+  .weather-card { cursor: pointer; }
+  .weather-card:hover { border-color: var(--accent); }
+
+  .clothing-panel {
     background: var(--card); border-radius: 12px;
-    padding: 14px 16px; margin-bottom: 12px;
-    display: flex; align-items: center; justify-content: space-between;
+    overflow: hidden; margin-bottom: 12px;
   }
+  .clothing-panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px;
+    font-size: 13px; font-weight: 600; color: var(--text);
+    border-bottom: 1px solid var(--bar-bg);
+  }
+  .clothing-close {
+    background: none; border: none; color: var(--sub);
+    font-size: 14px; cursor: pointer; padding: 0 4px;
+  }
+  .clothing-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--bar-bg);
+    font-size: 14px; color: var(--text);
+  }
+  .clothing-item:last-child { border-bottom: none; }
+  .clothing-item-icon { font-size: 20px; width: 28px; text-align: center; flex-shrink: 0; }
   .weather-temp { font-size: 2rem; font-weight: 600; color: var(--text); }
   .weather-details { font-size: 12px; color: var(--sub); text-align: right; }
 
@@ -2085,7 +2790,7 @@ void loop() {
   </div>
 </div>
 
-<div class="weather-card" id="weatherCard" style="display:none">
+<div class="weather-card" id="weatherCard" style="display:none" onclick="toggleClothing()" title="Tap for clothing recommendations">
   <div>
     <div class="weather-temp" id="wxTemp">--°</div>
     <div style="font-size:13px;color:var(--sub)" id="wxDesc">--</div>
@@ -2094,6 +2799,16 @@ void loop() {
     <div id="wxHumid">💧 --%</div>
     <div id="wxWind">💨 -- km/h</div>
   </div>
+  <div style="font-size:11px;color:var(--sub);margin-left:8px;opacity:0.6">👗</div>
+</div>
+
+<!-- Clothing recommendations panel — shown/hidden on weather card tap -->
+<div class="clothing-panel" id="clothingPanel-wrap" style="display:none">
+  <div class="clothing-panel-header">
+    <span>👗 What to Wear</span>
+    <button class="clothing-close" onclick="toggleClothing()">✕</button>
+  </div>
+  <div id="clothingPanel"></div>
 </div>
 
 <div class="task-card" id="taskCard">
@@ -2186,11 +2901,25 @@ function updateUI(d) {
 
   // Weather
   if (d.weather) {
+    _lastWeatherData = d.weather;
     document.getElementById('weatherCard').style.display = 'flex';
     document.getElementById('wxTemp').textContent  = `${Math.round(d.weather.temp)}°`;
     document.getElementById('wxDesc').textContent  = d.weather.desc || '';
     document.getElementById('wxHumid').textContent = `💧 ${d.weather.humid}%`;
     document.getElementById('wxWind').textContent  = `💨 ${Math.round(d.weather.wind)} km/h`;
+    // Keep clothing panel up-to-date if it's open
+    if (document.getElementById('clothingPanel-wrap').style.display !== 'none') {
+      updateClothing(d.weather);
+    }
+  }
+
+  // Weather error banner — shown when key is revoked, city is wrong, etc.
+  const wxErr = document.getElementById('wxErrorBanner');
+  if (d.weather_error) {
+    wxErr.style.display = 'block';
+    wxErr.innerHTML = `⚠ Weather: ${d.weather_error}. <a href="/config.html">Fix in Config →</a>`;
+  } else {
+    wxErr.style.display = 'none';
   }
 
   // Current task
@@ -2224,6 +2953,73 @@ function updateUI(d) {
   muteBtn.innerHTML += `<div class="btn-sub">${d.muted ? 'Audio off' : 'Audio on'}</div>`;
 }
 
+// ── Clothing recommendations ─────────────────────────────────────────────────
+let _lastWeatherData = null;
+
+function toggleClothing() {
+  const wrap = document.getElementById('clothingPanel-wrap');
+  const isVisible = wrap.style.display !== 'none';
+  wrap.style.display = isVisible ? 'none' : 'block';
+  if (!isVisible && _lastWeatherData) updateClothing(_lastWeatherData);
+}
+
+function updateClothing(wx) {
+  const items = recommendClothing(wx);
+  document.getElementById('clothingPanel').innerHTML = items
+    .map(i => `<div class="clothing-item">
+                 <span class="clothing-item-icon">${i.icon}</span>
+                 <span>${i.label}</span>
+               </div>`)
+    .join('');
+}
+
+function recommendClothing(wx) {
+  const temp   = wx.temp;
+  const wind   = wx.wind  || 0;
+  const humid  = wx.humid || 0;
+  const desc   = (wx.desc || '').toLowerCase();
+  const rainy  = /rain|drizzle|shower/.test(desc);
+  const snowy  = /snow|sleet|blizzard/.test(desc);
+  const stormy = /storm|thunder/.test(desc);
+  const items  = [];
+
+  // Top layer
+  if (temp < 0 || snowy)    items.push({icon:'🧥', label:'Heavy coat'});
+  else if (temp < 8)        items.push({icon:'🧥', label:'Winter coat'});
+  else if (temp < 14)       items.push({icon:'🧣', label:'Jacket + scarf'});
+  else if (temp < 18)       items.push({icon:'👕', label:'Light jacket'});
+  else if (temp < 24)       items.push({icon:'👕', label:'T-shirt / shirt'});
+  else                      items.push({icon:'👕', label:'Light top'});
+
+  // Bottom layer
+  if (temp < 8 || snowy)    items.push({icon:'👖', label:'Thermal trousers'});
+  else if (temp < 18)       items.push({icon:'👖', label:'Trousers / jeans'});
+  else                      items.push({icon:'🩳', label:'Shorts / light trousers'});
+
+  // Footwear
+  if (snowy || temp < 2)    items.push({icon:'🥾', label:'Winter boots'});
+  else if (rainy || stormy) items.push({icon:'🥾', label:'Waterproof shoes'});
+  else if (temp > 22)       items.push({icon:'👟', label:'Trainers / sandals'});
+  else                      items.push({icon:'👟', label:'Trainers'});
+
+  // Rain / storm
+  if (stormy)               items.push({icon:'⛈',  label:'Stay indoors if possible'});
+  else if (rainy)           items.push({icon:'☂️', label:'Umbrella'});
+
+  // Wind chill
+  if (wind > 30 && temp < 15) items.push({icon:'🧣', label:'Scarf / windbreaker'});
+  if (wind > 20 && temp < 10) items.push({icon:'🧤', label:'Gloves'});
+
+  // Sun
+  if (temp > 24)            items.push({icon:'🕶️', label:'Sunglasses'});
+  if (temp > 28)            items.push({icon:'🧴', label:'Sunscreen'});
+
+  // Hydration
+  if (humid > 80 && temp > 22) items.push({icon:'💧', label:'Stay hydrated'});
+
+  return items;
+}
+
 connect();
 </script>
 </body>
@@ -2232,7 +3028,272 @@ connect();
 
 ---
 
-## Schedule JSON Format
+### Setup Portal Validation (`data/setup.html`)
+
+Client-side validation runs before the POST fires. The firmware also validates server-side independently.
+
+**Validation rules:**
+
+| Field | Rule |
+|-------|------|
+| SSID | Required, 1–32 chars, no leading/trailing spaces |
+| Password | Empty = open network (allowed); if provided must be 8–63 chars (WPA2 spec) |
+| Timezone | Must be selected from dropdown — not free text |
+| City | Required, 2–85 chars, letters/spaces/hyphens only |
+| OWM API key | Optional; if provided must be exactly 32 lowercase hex characters |
+
+**`data/setup.html` — validation script**
+```javascript
+function validate() {
+  const ssid     = document.getElementById('ssid').value.trim();
+  const password = document.getElementById('password').value;
+  const city     = document.getElementById('city').value.trim();
+  const owmkey   = document.getElementById('owmkey').value.trim();
+  const errors   = [];
+
+  if (!ssid)
+    errors.push('WiFi network name is required.');
+  else if (ssid.length > 32)
+    errors.push('WiFi network name must be 32 characters or fewer.');
+  else if (ssid !== ssid.trim())
+    errors.push('WiFi network name cannot start or end with spaces.');
+
+  if (password.length > 0 && password.length < 8)
+    errors.push('WiFi password must be at least 8 characters (WPA2 minimum).');
+  if (password.length > 63)
+    errors.push('WiFi password must be 63 characters or fewer.');
+
+  if (!city)
+    errors.push('City is required for weather.');
+  else if (!/^[a-zA-Z\s\-'.]{2,85}$/.test(city))
+    errors.push('City name contains invalid characters.');
+
+  if (owmkey && !/^[a-f0-9]{32}$/.test(owmkey))
+    errors.push('OpenWeatherMap API key should be 32 hex characters — check you copied it fully.');
+
+  if (errors.length > 0) {
+    document.getElementById('error-box').innerHTML =
+      errors.map(e => `<div class="error-item">⚠ ${e}</div>`).join('');
+    document.getElementById('error-box').style.display = 'block';
+    return false;
+  }
+  document.getElementById('error-box').style.display = 'none';
+  return true;
+}
+
+async function submit() {
+  if (!validate()) return;
+
+  const btn = document.getElementById('submit-btn');
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  const payload = {
+    ssid:     document.getElementById('ssid').value.trim(),
+    password: document.getElementById('password').value,
+    timezone: document.getElementById('timezone').value,
+    city:     document.getElementById('city').value.trim(),
+    owmkey:   document.getElementById('owmkey').value.trim(),
+    metric:   document.getElementById('units').value === 'metric',
+  };
+
+  try {
+    const res  = await fetch('/save-setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      document.getElementById('error-box').innerHTML =
+        `<div class="error-item">⚠ ${data.error || 'Unknown error from device.'}</div>`;
+      document.getElementById('error-box').style.display = 'block';
+      btn.textContent = 'Save & Connect →';
+      btn.disabled = false;
+    } else {
+      if (data.warn === 'owmkey_suspect') {
+        btn.textContent = '✓ Saved (check API key) — rebooting…';
+      } else {
+        btn.textContent = '✓ Saved — rebooting device…';
+      }
+      // Device disconnects as it reboots — page goes offline naturally
+    }
+  } catch (e) {
+    // Connection dropped because device rebooted — that's expected
+    btn.textContent = '✓ Saved — device is connecting…';
+  }
+}
+```
+
+**Server-side error codes returned by `POST /save-setup`:**
+
+| Code | Meaning |
+|------|---------|
+| `ssid_required` | SSID field was empty |
+| `ssid_too_long` | SSID exceeded 32 characters |
+| `password_too_short` | Password provided but under 8 characters |
+| `password_too_long` | Password exceeded 63 characters |
+| `invalid_json` | POST body could not be parsed |
+| `warn: owmkey_suspect` | Key saved but length was not 32 chars — soft warning, not a failure |
+
+---
+
+### OWM Key Management (`data/config.html`)
+
+The config page shows a masked hint of the active key (last 6 chars) rather than a blank field. The full key is never sent to the browser. Replacing the key requires an explicit **Replace** button tap — saving the form without clicking Replace leaves the existing key untouched.
+
+**Key field states:**
+
+```
+No key set
+  └─► Empty input with placeholder "Paste 32-character API key"
+
+Key is set (normal)
+  └─► "…a3f92c  ● active   [Replace]"
+
+Key is set but weather_error = "API key invalid"
+  └─► "…a3f92c  ● invalid — replace key   [Replace]"   ← red dot + red label
+
+Replacing (after clicking Replace)
+  └─► Text input, live 0/32 character counter, [Cancel] link
+       ├─ 0 chars:  counter neutral
+       ├─ 1–31 chars: counter red
+       └─ 32 chars:  counter green
+```
+
+**`data/config.html` — OWM key field script**
+```javascript
+let owmKeyIsSet     = false;
+let owmKeyReplacing = false;
+
+// Call this after GET /api/config returns
+function initOwmField(config) {
+  owmKeyIsSet = config.owmkey_set;
+
+  if (owmKeyIsSet) {
+    document.getElementById('owm-hint-text').textContent = config.owmkey_hint;
+
+    if (config.weather_error === 'API key invalid') {
+      const s = document.getElementById('owm-status-text');
+      s.textContent = 'invalid — replace key';
+      s.style.color = 'var(--red)';
+      document.querySelector('.owm-dot').style.background = 'var(--red)';
+    }
+
+    document.getElementById('owm-hint-row').style.display  = 'flex';
+    document.getElementById('owm-input-row').style.display = 'none';
+  } else {
+    document.getElementById('owm-hint-row').style.display  = 'none';
+    document.getElementById('owm-input-row').style.display = 'block';
+  }
+}
+
+function startReplaceKey() {
+  owmKeyReplacing = true;
+  document.getElementById('owm-hint-row').style.display  = 'none';
+  document.getElementById('owm-input-row').style.display = 'block';
+  document.getElementById('owm-cancel-link').style.display = 'inline';
+  document.getElementById('owm-input').focus();
+}
+
+function cancelReplaceKey() {
+  owmKeyReplacing = false;
+  document.getElementById('owm-input').value = '';
+  document.getElementById('owm-input-row').style.display = 'none';
+  document.getElementById('owm-hint-row').style.display  = 'flex';
+  document.getElementById('owm-cancel-link').style.display = 'none';
+  document.getElementById('owm-error').style.display = 'none';
+}
+
+// Live character counter
+document.getElementById('owm-input').addEventListener('input', function() {
+  const n = this.value.trim().length;
+  const counter = document.getElementById('owm-char-count');
+  counter.textContent = `${n} / 32`;
+  counter.style.color = n === 0 ? '' : n === 32 ? 'var(--green)' : 'var(--red)';
+});
+
+// Returns: string = new key to send | null = no change | undefined = validation error
+function getOwmKeyForSave() {
+  const input = document.getElementById('owm-input').value.trim();
+
+  if (!owmKeyIsSet) {
+    // No key set — empty is fine (skips weather), any non-empty value gets validated
+    if (input && !/^[a-f0-9]{32}$/.test(input)) {
+      document.getElementById('owm-error').textContent =
+        'Key must be 32 lowercase hex characters.';
+      document.getElementById('owm-error').style.display = 'block';
+      return undefined;
+    }
+    return input || null;
+  }
+
+  if (owmKeyReplacing) {
+    if (!input) {
+      document.getElementById('owm-error').textContent =
+        'Enter a new key, or tap Cancel to keep the existing one.';
+      document.getElementById('owm-error').style.display = 'block';
+      return undefined;
+    }
+    if (!/^[a-f0-9]{32}$/.test(input)) {
+      document.getElementById('owm-error').textContent =
+        'Key must be 32 lowercase hex characters. Check you copied it fully.';
+      document.getElementById('owm-error').style.display = 'block';
+      return undefined;
+    }
+    document.getElementById('owm-error').style.display = 'none';
+    return input;
+  }
+
+  return null;  // Key set, user didn't click Replace — leave untouched
+}
+
+async function saveConfig() {
+  const owmKey = getOwmKeyForSave();
+  if (owmKey === undefined) return;  // Validation failed
+
+  const payload = {
+    timezone: document.getElementById('timezone').value,
+    city:     document.getElementById('city').value.trim(),
+    metric:   document.getElementById('units').value === 'metric',
+  };
+  if (owmKey !== null) payload.owmkey = owmKey;
+
+  const res = await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (res.ok) {
+    // Reload to refresh masked hint with new key tail
+    await loadConfig();
+    showToast('Settings saved');
+  }
+}
+
+async function loadConfig() {
+  const res    = await fetch('/api/config');
+  const config = await res.json();
+  document.getElementById('timezone').value = config.timezone || 'UTC0';
+  document.getElementById('city').value     = config.city     || '';
+  document.getElementById('units').value    = config.metric   ? 'metric' : 'imperial';
+  initOwmField(config);
+}
+
+loadConfig();
+```
+
+**POST payload behaviour:**
+
+| Scenario | Payload includes `owmkey`? | Result |
+|----------|---------------------------|--------|
+| Key not set, user pastes new key | Yes | Key saved, backoff reset, fetch triggered |
+| Key not set, user leaves blank | No | No key saved, weather stays unconfigured |
+| Key set, user never clicks Replace | No | Existing key untouched |
+| Key set, user clicks Replace + pastes | Yes | Key overwritten, backoff reset, fetch triggered |
+| Key set, user clicks Replace + cancels | No | Existing key untouched |
 
 **`data/schedule.json`**
 ```json
@@ -2522,11 +3583,16 @@ ESP.restart();
 ## Known Limitations & Future Ideas
 
 - **ADC accuracy:** ESP32-C3 ADC is non-linear; consider the MAX17048 LiPo fuel gauge ($8) for coulomb-counting if battery % accuracy matters
+- **Bunny emoji rendering:** TFT_eSPI renders the bunny as primitive shapes — smooth anti-aliasing is not available without a custom font or sprite sheet. The animation is readable but not pixel-art quality. For higher fidelity, store a 4-frame 28×22px RLE sprite in flash.
+- **Beep during WAV playback:** `beep()` reconfigures the I2S clock, which will interrupt any in-progress WAV playback. In practice this is fine since touch events don't fire during a voice prompt, but be aware if you add background audio.
+- **Backlight transistor:** At full brightness the ILI9341 backlight draws ~60mA, which is at the ESP32-C3 GPIO source limit. For sustained full brightness, add a 2N2222 NPN transistor as noted in BacklightManager.
+- **Weather cache age display:** The `errorMsg = "Cached Xh ago"` stale flag shows in the weather row on the display. It does not block the clothing overlay — recommendations still use the cached data.
 - **Dynamic audio:** Task names use generic prompts; for name-specific voice ("Starting: Drink Coffee"), implement clip concatenation or add a small TTS cache
 - **OTA updates:** Add ArduinoOTA for wireless firmware updates — saves repeated USB connections once the case is assembled
 - **DST edge cases:** POSIX tz strings handle DST automatically via `tzset()` but verify your timezone string at [timezone.ctz.io](https://timezone.ctz.io)
 - **Multi-day tasks:** Current scheduler is wall-clock daily only; overnight tasks (spanning midnight) are not supported in v1
 - **Touch calibration:** XPT2046 may need calibration constants adjusted per panel; use TFT_eSPI's `touch_calibrate` example sketch first run
+- **Weather backoff on reboot:** `wxBackoffUntil` is stored in RAM only — if the device reboots while in a permanent backoff state (bad key/city), it will attempt one fetch on boot before re-entering backoff. This is fine in practice since the error is surfaced immediately on that first attempt.
 
 ---
 

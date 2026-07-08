@@ -44,11 +44,31 @@
     height: 100%; border-radius: 1px; transition: width 0.5s, background 0.5s;
   }
 
-  .weather-card {
+  .weather-card { cursor: pointer; }
+  .weather-card:hover { border-color: var(--accent); }
+
+  .clothing-panel {
     background: var(--card); border-radius: 12px;
-    padding: 14px 16px; margin-bottom: 12px;
-    display: flex; align-items: center; justify-content: space-between;
+    overflow: hidden; margin-bottom: 12px;
   }
+  .clothing-panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px;
+    font-size: 13px; font-weight: 600; color: var(--text);
+    border-bottom: 1px solid var(--bar-bg);
+  }
+  .clothing-close {
+    background: none; border: none; color: var(--sub);
+    font-size: 14px; cursor: pointer; padding: 0 4px;
+  }
+  .clothing-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--bar-bg);
+    font-size: 14px; color: var(--text);
+  }
+  .clothing-item:last-child { border-bottom: none; }
+  .clothing-item-icon { font-size: 20px; width: 28px; text-align: center; flex-shrink: 0; }
   .weather-temp { font-size: 2rem; font-weight: 600; color: var(--text); }
   .weather-details { font-size: 12px; color: var(--sub); text-align: right; }
 
@@ -118,7 +138,7 @@
   </div>
 </div>
 
-<div class="weather-card" id="weatherCard" style="display:none">
+<div class="weather-card" id="weatherCard" style="display:none" onclick="toggleClothing()" title="Tap for clothing recommendations">
   <div>
     <div class="weather-temp" id="wxTemp">--°</div>
     <div style="font-size:13px;color:var(--sub)" id="wxDesc">--</div>
@@ -127,6 +147,21 @@
     <div id="wxHumid">💧 --%</div>
     <div id="wxWind">💨 -- km/h</div>
   </div>
+  <div style="font-size:11px;color:var(--sub);margin-left:8px;opacity:0.6">👗</div>
+</div>
+
+<!-- Weather error banner — shown when weather_error is set in WebSocket payload -->
+<div id="wxErrorBanner" style="display:none;background:#1a0e0e;border:1px solid #3d1a1a;
+     border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#f25c5c;">
+</div>
+
+<!-- Clothing recommendations panel — shown/hidden on weather card tap -->
+<div class="clothing-panel" id="clothingPanel-wrap" style="display:none">
+  <div class="clothing-panel-header">
+    <span>👗 What to Wear</span>
+    <button class="clothing-close" onclick="toggleClothing()">✕</button>
+  </div>
+  <div id="clothingPanel"></div>
 </div>
 
 <div class="task-card" id="taskCard">
@@ -219,11 +254,25 @@ function updateUI(d) {
 
   // Weather
   if (d.weather) {
+    _lastWeatherData = d.weather;
     document.getElementById('weatherCard').style.display = 'flex';
     document.getElementById('wxTemp').textContent  = `${Math.round(d.weather.temp)}°`;
     document.getElementById('wxDesc').textContent  = d.weather.desc || '';
     document.getElementById('wxHumid').textContent = `💧 ${d.weather.humid}%`;
     document.getElementById('wxWind').textContent  = `💨 ${Math.round(d.weather.wind)} km/h`;
+    // Keep clothing panel up-to-date if it's open
+    if (document.getElementById('clothingPanel-wrap').style.display !== 'none') {
+      updateClothing(d.weather);
+    }
+  }
+
+  // Weather error banner — shown when key is revoked, city is wrong, etc.
+  const wxErr = document.getElementById('wxErrorBanner');
+  if (d.weather_error) {
+    wxErr.style.display = 'block';
+    wxErr.innerHTML = `⚠ Weather: ${d.weather_error}. <a href="/config.html">Fix in Config →</a>`;
+  } else {
+    wxErr.style.display = 'none';
   }
 
   // Current task
@@ -255,6 +304,73 @@ function updateUI(d) {
   muteBtn.classList.toggle('active', d.muted);
   muteBtn.innerHTML = d.muted ? '🔇 Unmute' : '🔔 Mute';
   muteBtn.innerHTML += `<div class="btn-sub">${d.muted ? 'Audio off' : 'Audio on'}</div>`;
+}
+
+// ── Clothing recommendations ─────────────────────────────────────────────────
+let _lastWeatherData = null;
+
+function toggleClothing() {
+  const wrap = document.getElementById('clothingPanel-wrap');
+  const isVisible = wrap.style.display !== 'none';
+  wrap.style.display = isVisible ? 'none' : 'block';
+  if (!isVisible && _lastWeatherData) updateClothing(_lastWeatherData);
+}
+
+function updateClothing(wx) {
+  const items = recommendClothing(wx);
+  document.getElementById('clothingPanel').innerHTML = items
+    .map(i => `<div class="clothing-item">
+                 <span class="clothing-item-icon">${i.icon}</span>
+                 <span>${i.label}</span>
+               </div>`)
+    .join('');
+}
+
+function recommendClothing(wx) {
+  const temp   = wx.temp;
+  const wind   = wx.wind  || 0;
+  const humid  = wx.humid || 0;
+  const desc   = (wx.desc || '').toLowerCase();
+  const rainy  = /rain|drizzle|shower/.test(desc);
+  const snowy  = /snow|sleet|blizzard/.test(desc);
+  const stormy = /storm|thunder/.test(desc);
+  const items  = [];
+
+  // Top layer
+  if (temp < 0 || snowy)    items.push({icon:'🧥', label:'Heavy coat'});
+  else if (temp < 8)        items.push({icon:'🧥', label:'Winter coat'});
+  else if (temp < 14)       items.push({icon:'🧣', label:'Jacket + scarf'});
+  else if (temp < 18)       items.push({icon:'👕', label:'Light jacket'});
+  else if (temp < 24)       items.push({icon:'👕', label:'T-shirt / shirt'});
+  else                      items.push({icon:'👕', label:'Light top'});
+
+  // Bottom layer
+  if (temp < 8 || snowy)    items.push({icon:'👖', label:'Thermal trousers'});
+  else if (temp < 18)       items.push({icon:'👖', label:'Trousers / jeans'});
+  else                      items.push({icon:'🩳', label:'Shorts / light trousers'});
+
+  // Footwear
+  if (snowy || temp < 2)    items.push({icon:'🥾', label:'Winter boots'});
+  else if (rainy || stormy) items.push({icon:'🥾', label:'Waterproof shoes'});
+  else if (temp > 22)       items.push({icon:'👟', label:'Trainers / sandals'});
+  else                      items.push({icon:'👟', label:'Trainers'});
+
+  // Rain / storm
+  if (stormy)               items.push({icon:'⛈',  label:'Stay indoors if possible'});
+  else if (rainy)           items.push({icon:'☂️', label:'Umbrella'});
+
+  // Wind chill
+  if (wind > 30 && temp < 15) items.push({icon:'🧣', label:'Scarf / windbreaker'});
+  if (wind > 20 && temp < 10) items.push({icon:'🧤', label:'Gloves'});
+
+  // Sun
+  if (temp > 24)            items.push({icon:'🕶️', label:'Sunglasses'});
+  if (temp > 28)            items.push({icon:'🧴', label:'Sunscreen'});
+
+  // Hydration
+  if (humid > 80 && temp > 22) items.push({icon:'💧', label:'Stay hydrated'});
+
+  return items;
 }
 
 connect();
