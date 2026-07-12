@@ -24,6 +24,14 @@
   .error-box { display:none; background:#2a1010; border:1px solid #3d1a1a;
                 border-radius:8px; padding:10px 12px; margin-bottom:12px; }
   .error-item { font-size:12px; color:#f25c5c; padding:3px 0; }
+  .wifi-scan-row { display:flex; gap:6px; margin-bottom:6px; }
+  .wifi-scan-row select { flex:1; }
+  .scan-btn { width:auto; padding:9px 12px; margin:0; font-size:14px;
+               background:#1a2235; border:1px solid #1e2d45; color:#e8f0fe;
+               border-radius:8px; cursor:pointer; }
+  .scan-btn:disabled { opacity:0.5; cursor:not-allowed; }
+  .scan-btn.spinning { animation: spin 1s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -35,6 +43,12 @@
 
 <div class="field">
   <label>WiFi Network (SSID)</label>
+  <div class="wifi-scan-row">
+    <select id="wifi-scan-select" onchange="onWifiSelect()">
+      <option value="">Scanning for networks…</option>
+    </select>
+    <button type="button" class="scan-btn" id="scan-btn" onclick="scanWifi()" title="Rescan">⟳</button>
+  </div>
   <input type="text" id="ssid" placeholder="Your network name" maxlength="32" autocomplete="off">
 </div>
 <div class="field">
@@ -80,6 +94,66 @@
 <p class="hint">Device will reboot and connect to your WiFi network</p>
 
 <script>
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
+
+function signalBars(rssi) {
+  if (rssi >= -55) return '▂▄▆█';
+  if (rssi >= -67) return '▂▄▆';
+  if (rssi >= -78) return '▂▄';
+  return '▂';
+}
+
+async function scanWifi() {
+  const sel = document.getElementById('wifi-scan-select');
+  const btn = document.getElementById('scan-btn');
+
+  sel.innerHTML = '<option value="">Scanning…</option>';
+  sel.disabled  = true;
+  btn.disabled  = true;
+  btn.classList.add('spinning');
+
+  try {
+    const res = await fetch('/api/wifiscan');
+    const networks = await res.json();
+
+    if (!Array.isArray(networks) || networks.length === 0) {
+      sel.innerHTML = '<option value="">No networks found — enter manually below</option>';
+    } else {
+      networks.sort((a, b) => b.rssi - a.rssi);
+      sel.innerHTML =
+        '<option value="">— Select a network —</option>' +
+        networks.map(n => {
+          const lock = n.secure ? ' 🔒' : '';
+          return `<option value="${escapeHtml(n.ssid)}">${signalBars(n.rssi)}  ${escapeHtml(n.ssid)}${lock}</option>`;
+        }).join('') +
+        '<option value="__manual__">Other (enter manually)…</option>';
+    }
+  } catch (e) {
+    sel.innerHTML = '<option value="">Scan failed — enter manually below</option>';
+  }
+
+  sel.disabled = false;
+  btn.disabled = false;
+  btn.classList.remove('spinning');
+}
+
+function onWifiSelect() {
+  const sel = document.getElementById('wifi-scan-select');
+  if (sel.value && sel.value !== '__manual__') {
+    document.getElementById('ssid').value = sel.value;
+    document.getElementById('password').focus();
+  } else if (sel.value === '__manual__') {
+    document.getElementById('ssid').value = '';
+    document.getElementById('ssid').focus();
+  }
+}
+
+scanWifi();  // auto-scan as soon as the setup page loads
+
 function validate() {
   const ssid     = document.getElementById('ssid').value.trim();
   const password = document.getElementById('password').value;

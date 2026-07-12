@@ -1,4 +1,5 @@
 #include "BatteryMonitor.h"
+//static inline void delayMicroseconds(uint32_t us) { (void)us; }
 
 BatteryMonitor& BatteryMonitor::instance() {
   static BatteryMonitor inst;

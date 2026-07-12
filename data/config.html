@@ -44,10 +44,27 @@
                border-bottom:1px solid rgba(30,45,69,0.4); gap:8px; font-size:11px; }
   .task-row-name { flex:1; color:var(--text); }
   .task-row-time { color:var(--sub); font-size:10px; }
-  .add-link { padding:6px 10px; font-size:10px; color:var(--accent); display:block; }
+  .add-link { padding:6px 10px; font-size:10px; color:var(--accent); display:block;
+               background:none; border:none; cursor:pointer; font-family:inherit; text-align:left; width:100%; }
   .add-group-btn { width:100%; padding:9px; background:transparent;
                     border:1px solid var(--border); color:var(--accent);
                     border-radius:6px; font-size:12px; cursor:pointer; font-family:inherit; }
+  .task-row-actions { display:flex; gap:6px; flex-shrink:0; }
+  .icon-btn { background:none; border:none; color:var(--sub); font-size:12px;
+               cursor:pointer; padding:2px 4px; font-family:inherit; }
+  .icon-btn:hover { color:var(--accent); }
+  .icon-btn.danger:hover { color:var(--red); }
+  .group-actions { display:flex; gap:4px; flex-shrink:0; }
+  .task-edit-form { padding:10px; background:rgba(0,0,0,0.15);
+                      border-bottom:1px solid rgba(30,45,69,0.4); }
+  .task-edit-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px; }
+  .task-edit-row.full { grid-template-columns:1fr; }
+  .task-edit-actions { display:flex; gap:8px; margin-top:2px; }
+  .btn-small { padding:6px 12px; border-radius:6px; font-size:11px; font-weight:600;
+                cursor:pointer; font-family:inherit; border:none; }
+  .btn-small.primary { background:var(--accent); color:#000; }
+  .btn-small.ghost { background:transparent; border:1px solid var(--border); color:var(--sub); }
+  .checkbox-field { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--sub); }
   a { color:var(--accent); text-decoration:none; }
   .nav { display:flex; gap:8px; margin-bottom:16px; }
   .nav a { font-size:12px; color:var(--sub); padding:5px 10px; border:1px solid var(--border);
@@ -264,19 +281,54 @@ async function loadConfig() {
 loadConfig();
 
 
-// Load schedule groups
+// In-memory copy of the schedule. All edits mutate this, then persist via saveSchedule().
+let scheduleData = { groups: [] };
+
+// Which task is currently showing its inline edit form: {groupId, taskId} or null
+let editingTask = null;
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
+
+function genId(prefix) {
+  return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
 async function loadSchedule() {
   try {
     const res  = await fetch('/api/schedule');
     const data = await res.json();
-    renderGroups(data.groups || []);
+    scheduleData = { groups: data.groups || [] };
+    renderGroups();
   } catch(e) {
     document.getElementById('groups-container').innerHTML =
       '<div style="color:var(--red);font-size:12px;padding:12px;">Could not load schedule</div>';
   }
 }
 
-function renderGroups(groups) {
+// Persists the full scheduleData object back to the device, then re-renders.
+async function saveSchedule() {
+  try {
+    const res = await fetch('/api/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(scheduleData),
+    });
+    if (!res.ok) throw new Error('save failed');
+    showToast('Schedule saved');
+  } catch (e) {
+    alert('Could not save changes — check the device is still connected and try again.');
+    await loadSchedule();  // Revert to last-known-good state from the device
+    return;
+  }
+  renderGroups();
+}
+
+function renderGroups() {
+  const groups = scheduleData.groups;
   const c = document.getElementById('groups-container');
   if (!groups.length) {
     c.innerHTML = '<div style="color:var(--sub);font-size:12px;text-align:center;padding:20px;">No groups yet</div>';
@@ -286,24 +338,180 @@ function renderGroups(groups) {
     <div class="group-card">
       <div class="group-header">
         <div class="group-color" style="background:${g.color || '#00c8ff'}"></div>
-        <div class="group-name">${g.icon || ''} ${g.name}</div>
+        <div class="group-name">${escapeHtml(g.icon || '')} ${escapeHtml(g.name)}</div>
         <span style="font-size:10px;color:var(--sub)">${g.tasks?.length || 0} tasks</span>
-      </div>
-      ${(g.tasks || []).map(t => `
-        <div class="task-row">
-          <div class="task-row-name">${t.name}</div>
-          <div class="task-row-time">${t.start_time} · ${t.duration_min} min · ${t.recurrence}</div>
+        <div class="group-actions">
+          <button class="icon-btn" title="Rename group" onclick="editGroup('${g.id}')">✎</button>
+          <button class="icon-btn danger" title="Delete group" onclick="deleteGroup('${g.id}')">🗑</button>
         </div>
-      `).join('')}
-      <a class="add-link" href="#">＋ Add task</a>
+      </div>
+      ${(g.tasks || []).map(t => renderTaskRow(g, t)).join('')}
+      <button class="add-link" onclick="addTask('${g.id}')">＋ Add task</button>
     </div>
   `).join('');
 }
 
+function renderTaskRow(g, t) {
+  const isEditing = editingTask && editingTask.groupId === g.id && editingTask.taskId === t.id;
+
+  if (isEditing) {
+    return `
+      <div class="task-edit-form">
+        <div class="task-edit-row">
+          <div>
+            <label class="config-label">Name</label>
+            <input class="config-input" id="edit-name" value="${escapeHtml(t.name)}">
+          </div>
+          <div>
+            <label class="config-label">Start time</label>
+            <input class="config-input" type="time" id="edit-start" value="${escapeHtml(t.start_time)}">
+          </div>
+        </div>
+        <div class="task-edit-row">
+          <div>
+            <label class="config-label">Duration (min)</label>
+            <input class="config-input" type="number" min="1" max="600" id="edit-duration" value="${t.duration_min}">
+          </div>
+          <div>
+            <label class="config-label">Recurrence</label>
+            <select class="config-input" id="edit-recurrence">
+              ${['daily','weekdays','weekends'].map(r =>
+                `<option value="${r}" ${t.recurrence===r?'selected':''}>${r}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="task-edit-row full">
+          <label class="checkbox-field">
+            <input type="checkbox" id="edit-enabled" ${t.enabled ? 'checked' : ''}>
+            Task enabled
+          </label>
+        </div>
+        <div class="task-edit-actions">
+          <button class="btn-small primary" onclick="saveTaskEdit('${g.id}','${t.id}')">Save</button>
+          <button class="btn-small ghost" onclick="cancelTaskEdit()">Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="task-row">
+      <div class="task-row-name">${escapeHtml(t.name)}${t.enabled ? '' : ' <span style="color:var(--sub)">(disabled)</span>'}</div>
+      <div class="task-row-time">${escapeHtml(t.start_time)} · ${t.duration_min} min · ${escapeHtml(t.recurrence)}</div>
+      <div class="task-row-actions">
+        <button class="icon-btn" title="Edit task" onclick="editTask('${g.id}','${t.id}')">✎</button>
+        <button class="icon-btn danger" title="Delete task" onclick="deleteTask('${g.id}','${t.id}')">🗑</button>
+      </div>
+    </div>`;
+}
+
+// ── Task actions ──────────────────────────────────────────────────────────
+function editTask(groupId, taskId) {
+  editingTask = { groupId, taskId };
+  renderGroups();
+}
+
+function cancelTaskEdit() {
+  editingTask = null;
+  renderGroups();
+}
+
+function saveTaskEdit(groupId, taskId) {
+  const group = scheduleData.groups.find(g => g.id === groupId);
+  const task  = group?.tasks.find(t => t.id === taskId);
+  if (!task) return;
+
+  const name       = document.getElementById('edit-name').value.trim();
+  const startTime  = document.getElementById('edit-start').value;
+  const duration   = parseInt(document.getElementById('edit-duration').value, 10);
+  const recurrence = document.getElementById('edit-recurrence').value;
+  const enabled    = document.getElementById('edit-enabled').checked;
+
+  if (!name) { alert('Task name is required.'); return; }
+  if (!startTime) { alert('Start time is required.'); return; }
+  if (!duration || duration < 1) { alert('Duration must be at least 1 minute.'); return; }
+
+  task.name         = name;
+  task.start_time   = startTime;
+  task.duration_min = duration;
+  task.recurrence   = recurrence;
+  task.enabled      = enabled;
+
+  editingTask = null;
+  saveSchedule();
+}
+
+function deleteTask(groupId, taskId) {
+  const group = scheduleData.groups.find(g => g.id === groupId);
+  const task  = group?.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  if (!confirm(`Delete task "${task.name}"? This cannot be undone.`)) return;
+
+  group.tasks = group.tasks.filter(t => t.id !== taskId);
+  saveSchedule();
+}
+
+function addTask(groupId) {
+  const group = scheduleData.groups.find(g => g.id === groupId);
+  if (!group) return;
+
+  const name = prompt('Task name:');
+  if (!name || !name.trim()) return;
+
+  const newTask = {
+    id: genId('t'),
+    name: name.trim(),
+    start_time: '09:00',
+    duration_min: 10,
+    audio_start: '',
+    audio_mid: '',
+    audio_done: '',
+    recurrence: 'daily',
+    enabled: true,
+  };
+  group.tasks.push(newTask);
+
+  // Immediately open the new task in edit mode so the user can set the real time/duration.
+  // saveSchedule() re-renders internally, and renderGroups() reads editingTask each time,
+  // so setting it before saving is enough — no need to set it again afterward.
+  editingTask = { groupId, taskId: newTask.id };
+  saveSchedule();
+}
+
+// ── Group actions ────────────────────────────────────────────────────────
+function editGroup(groupId) {
+  const group = scheduleData.groups.find(g => g.id === groupId);
+  if (!group) return;
+  const name = prompt('Group name:', group.name);
+  if (!name || !name.trim()) return;
+  group.name = name.trim();
+  saveSchedule();
+}
+
+function deleteGroup(groupId) {
+  const group = scheduleData.groups.find(g => g.id === groupId);
+  if (!group) return;
+  const taskCount = group.tasks?.length || 0;
+  const msg = taskCount > 0
+    ? `Delete group "${group.name}" and its ${taskCount} task(s)? This cannot be undone.`
+    : `Delete group "${group.name}"?`;
+  if (!confirm(msg)) return;
+
+  scheduleData.groups = scheduleData.groups.filter(g => g.id !== groupId);
+  saveSchedule();
+}
+
 function addGroup() {
   const name = prompt('Group name:');
-  if (!name) return;
-  // TODO: POST new group to /api/schedule
+  if (!name || !name.trim()) return;
+
+  scheduleData.groups.push({
+    id: genId('g'),
+    name: name.trim(),
+    icon: '',
+    color: '#00c8ff',
+    tasks: [],
+  });
+  saveSchedule();
 }
 
 loadSchedule();

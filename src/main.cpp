@@ -160,8 +160,8 @@ void fetchWeather()
   case 200:
   {
     JsonDocument doc;
-    auto err = deserializeJson(doc, http.getStream());
-    if (err == DeserializationError::Ok)
+    DeserializationError err = deserializeJson(doc, http.getStream());
+    if (!err)
     {
       wx.temp = doc["main"]["temp"].as<float>();
       wx.feelsLike = doc["main"]["feels_like"].as<float>();
@@ -282,7 +282,7 @@ void startSTA()
 void startAP()
 {
   apMode = true;
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP("ScheduleTracker-Setup", "setup1234");
   dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
   Serial.println("[WiFi] AP mode: ScheduleTracker-Setup");
@@ -377,17 +377,16 @@ void loop()
   uint32_t now_ms = millis();
 
   // ── 1-second tick ──────────────────────────────────────────────────────────
+  // ── 1-second tick ──────────────────────────────────────────
   if (now_ms - lastTick >= 1000)
   {
     lastTick = now_ms;
-
     time_t t = time(nullptr);
     std::tm *tm_now = localtime(&t);
-
     TaskScheduler::instance().tick(tm_now);
-    DisplayManager::instance().update(tm_now);
+    if (!DisplayManager::instance().overlayActive())
+      DisplayManager::instance().update(tm_now);
   }
-
   // ── WebSocket broadcast every 1s ───────────────────────────────────────────
   if (now_ms - lastWsBcast >= 1000)
   {
@@ -415,43 +414,51 @@ void loop()
   // ── Backlight auto-dim ─────────────────────────────────────────────────────
   BacklightManager::instance().tick();
 
-  // ── Touch input ────────────────────────────────────────────────────────────
-  static uint32_t lastTouch = 0;
-  if (now_ms - lastTouch > 300)
-  { // 300ms debounce
-    int zone = DisplayManager::instance().pollTouch();
-    if (zone >= 0)
+  // ── Touch input ─────────────────────────────────────────────
+  DisplayManager::instance().updateTaskListScroll(); // drag-scroll, every iteration
+  if (DisplayManager::instance().consumeDirty())
+  {
+    time_t t = time(nullptr);
+    std::tm *tm_now = localtime(&t);
+    DisplayManager::instance().update(tm_now);
+  }
+
+  if (DisplayManager::instance().overlayActive())
+  {
+    DisplayManager::instance().tickOverlay();
+  }
+  else
+  {
+    static uint32_t lastTouch = 0;
+    if (now_ms - lastTouch > 300)
     {
-      lastTouch = now_ms;
-
-      // Wake backlight on any touch — do this first so feedback feels instant
-      BacklightManager::instance().wake();
-
-      // Touch beep (skip if muted)
-      if (!Config::instance().data.muted)
+      int zone = DisplayManager::instance().pollTouch();
+      if (zone >= 0)
       {
-        AudioManager::instance().beep(1200, 18);
-      }
+        lastTouch = now_ms;
+        BacklightManager::instance().wake();
+        if (!Config::instance().data.muted)
+          AudioManager::instance().beep(1200, 18);
 
-      switch (zone)
-      {
-      case 1: // All Tasks
-        DisplayManager::instance().setScreen(Screen::TASK_LIST);
-        break;
-      case 2: // Mute toggle
-      {
-        auto &cfg = Config::instance();
-        cfg.data.muted = !cfg.data.muted;
-        cfg.save();
-        Serial.printf("[Touch] Mute: %s\n", cfg.data.muted ? "ON" : "OFF");
-      }
-      break;
-      case 3: // Back (from task list)
-        DisplayManager::instance().setScreen(Screen::HOME);
-        break;
-      case 4: // Weather row — show clothing overlay
-        DisplayManager::instance().showClothingOverlay();
-        break;
+        switch (zone)
+        {
+        case 1:
+          DisplayManager::instance().setScreen(Screen::TASK_LIST);
+          break;
+        case 2:
+        {
+          auto &cfg = Config::instance();
+          cfg.data.muted = !cfg.data.muted;
+          cfg.save();
+          break;
+        }
+        case 3:
+          DisplayManager::instance().setScreen(Screen::HOME);
+          break;
+        case 4:
+          DisplayManager::instance().showClothingOverlay();
+          break;
+        }
       }
     }
   }

@@ -28,7 +28,7 @@ bool TaskScheduler::loadFromFile(const char *path)
   JsonDocument doc;
   auto err = deserializeJson(doc, f);
   f.close();
-  if (err != DeserializationError::Ok)
+  if (err)
   {
     Serial.println("[TaskScheduler] JSON parse error");
     return false;
@@ -64,7 +64,7 @@ bool TaskScheduler::loadFromFile(const char *path)
       task.recurrence = t["recurrence"].as<String>();
       if (task.recurrence.isEmpty())
         task.recurrence = "daily";
-      task.enabled = t["enabled"].as<bool>() ? t["enabled"].as<bool>() : true;
+      task.enabled = t["enabled"] | true;
       task.completedToday = false;
       grp.tasks.push_back(task);
     }
@@ -110,7 +110,7 @@ void TaskScheduler::_findActiveTask(std::tm *now)
   {
     for (auto &task : grp.tasks)
     {
-      if (!task.enabled || !_taskDueToday(const_cast<Task &>(task), now))
+      if (!task.enabled || !_taskDueToday(task, now))
         continue;
 
       if (_taskActiveNow(task, now))

@@ -17,11 +17,9 @@ public:
   // freq: tone frequency in Hz (default 1200Hz — crisp without being harsh)
   // durationMs: tone length in milliseconds (default 18ms)
   void beep(uint16_t freq = 1200, uint16_t durationMs = 18);
-  void setVolume(float vol) { _volume = vol; } // 0.0 to 1.0 (or higher)
-  
+
 private:
   AudioManager() {}
-  float _volume = 1.0f; // Default to full volume
 
   static constexpr i2s_port_t I2S_PORT  = I2S_NUM_0;
   static constexpr int         PIN_BCLK  = 20;

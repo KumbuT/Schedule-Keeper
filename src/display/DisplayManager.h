@@ -25,10 +25,20 @@ class DisplayManager
 {
 public:
   static DisplayManager &instance();
+  void updateTaskListScroll(); // Call every loop() iteration; no-op unless on TASK_LIST
   void begin();
   void update(struct tm *now);
   void setScreen(Screen s);
-  void showClothingOverlay(); // Blocks until tap or 8s timeout, then redraws
+  // void showClothingOverlay(); // Blocks until tap or 8s timeout, then redraws
+  void showClothingOverlay(); // Now: draws and arms the overlay, returns immediately
+  void tickOverlay();         // Call every loop() iteration while overlay is active
+  bool overlayActive() const { return _overlayActive; }
+  bool consumeDirty()
+  {
+    bool d = _screenDirty;
+    _screenDirty = false;
+    return d;
+  }
 
   WeatherData weather;
 
@@ -36,16 +46,20 @@ public:
   int pollTouch();
 
 private:
+  int _touchStartY = 0;
+  bool _isDragging = false;
+  bool _overlayActive = false;
+  uint32_t _overlayStart = 0;
   DisplayManager() {}
-
   TFT_eSPI _tft;
   Screen _screen = Screen::HOME;
   bool _screenDirty = true;
-  int _scrollOffset = 0; // For task list scrolling
+  int _scrollOffset = 0;   // For task list scrolling
+  int _contentHeight = 0;  // total height of task list content (set by _drawTaskList)
+  bool _touchDown = false; // true while finger is held down on TASK_LIST screen
+  int _lastTouchY = 0;     // previous frame's touch Y, for delta calculation
   bool _groupExpanded[16] = {};
-  float _gaugeAnimT = 0.0f; // Seconds elapsed — drives gauge animation
-  bool _blinkOn = true;     // Eye blink state
-  float _blinkTimer = 3.0f; // Seconds until next blink toggle
+  float _gaugeAnimT = 0.0f; // Seconds elapsed — drives gauge bob and arc pulse
 
   // Drawing methods
   void _drawStatusBar(struct tm *now);
@@ -54,23 +68,13 @@ private:
   void _drawNavBar();
   void _drawTaskList();
   void _drawClothingOverlay(const std::vector<struct ClothingItem> &items);
+  void _handleTaskListTap(int ty); // <-- add this line
 
-  // Bunny timeline animation — drawn above the progress bar track
-  // barX/barY/barW: progress bar geometry
-  // progressPct: 0–100
-  // remainingSec/totalSec: for speed scaling
-  void _drawBunny(int barX, int barY, int barW,
-                  float progressPct, int remainingSec, int totalSec);
-
-  // Gauge timer — replaces the flat progress bar with a circular arc gauge
-  // containing the kawaii bunny in the centre.
-  // cx/cy: centre of gauge on screen, r: outer radius
-  void _drawGauge(int cx, int cy, int r, float progressPct,
-                  int remainingSec, int totalSec);
-
-  // Kawaii bunny face — drawn inside the gauge centre
-  // urgency: 0.0=relaxed, 1.0=panicking
-  void _drawKawaiBunny(int cx, int cy, float urgency);
+  // Dial timer — 270° arc ring with emoji inside
+  // cx=120, cy=174, r=64 for the 240×320 layout
+  void _drawDial(int cx, int cy, int r,
+                 float progressPct, int remainingSec, int totalSec,
+                 float urgency, uint32_t arcColor);
 
   // Widget helpers
   void _drawWifiArcs(int cx, int cy, int rssi);
@@ -88,14 +92,5 @@ private:
   static constexpr uint32_t CLR_RED = 0xF800;
   static constexpr uint32_t CLR_BAR_BG = 0x39C7;
   static constexpr uint32_t CLR_STATUSBG = 0x0841;
-
-  // Kawaii bunny palette (RGB565)
-  // Cream: #F5F0DC → R=0x1E, G=0x3C, B=0x1B → 0xF79B
-  static constexpr uint32_t CLR_BUNNY_CREAM = 0xF79B;
-  // Pink ear/cheek: #F0B8B0 → 0xF596
-  static constexpr uint32_t CLR_BUNNY_PINK = 0xF596;
-  // Outline: #1a1a1a → near black → 0x18C3
-  static constexpr uint32_t CLR_BUNNY_OUTLINE = 0x18C3;
-  // Gauge track background
-  static constexpr uint32_t CLR_GAUGE_BG = 0x2945;
+  static constexpr uint32_t CLR_GAUGE_BG = 0x2945; // dial arc track
 };
