@@ -458,6 +458,9 @@ void loop()
         case 4:
           DisplayManager::instance().showClothingOverlay();
           break;
+        case 5:
+          DisplayManager::instance().setScreen(Screen::TIMER_SET);
+          break;
         }
       }
     }

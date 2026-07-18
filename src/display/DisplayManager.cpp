@@ -32,6 +32,16 @@ void DisplayManager::begin()
 
 void DisplayManager::update(std::tm *now)
 {
+  if (_screen == Screen::TIMER_SET)
+  {
+    _drawTimerSet();
+    return;
+  }
+  if (_screen == Screen::TIMER_RUNNING)
+  {
+    _drawTimerRunning();
+    return;
+  }
   // 1. Draw your status bar at the top
   _drawStatusBar(now);
 
@@ -416,12 +426,21 @@ int DisplayManager::pollTouch()
     return 0;
   }
 
+  if (_screen == Screen::TIMER_SET)
+    return _handleTimerSetTouch(tx, ty);
+  if (_screen == Screen::TIMER_RUNNING)
+    return _handleTimerRunningTouch(tx, ty);
+
   // HOME screen zones
   if (ty >= 20 && ty < 60)
     return 4; // Weather row → clothing overlay
   if (ty > 262)
-  { // Nav bar
-    return (tx < 120) ? 1 : 2;
+  { // Nav bar, now 3 buttons
+    if (tx < 80)
+      return 1; // Task List
+    if (tx < 160)
+      return 5; // Timer (NEW)
+    return 2;   // Mute
   }
 
   return 0;
@@ -432,6 +451,7 @@ int DisplayManager::pollTouch()
 // then redraws the current screen.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "ClothingAdvisor.h"
+#include <audio/AudioManager.h>
 
 void DisplayManager::showClothingOverlay()
 {
@@ -660,4 +680,134 @@ void DisplayManager::updateTaskListScroll()
     _touchDown = false;
     _isDragging = false;
   }
+}
+
+// ── Manual timer ──────────────────────────────────────────────────────────
+void DisplayManager::startTimer(uint32_t seconds)
+{
+  _timerDurationSec = seconds;
+  _timerStartMillis = millis();
+  _timerRunning = true;
+  _timerDone = false;
+  setScreen(Screen::TIMER_RUNNING);
+}
+
+void DisplayManager::_drawTimerSet()
+{
+  _tft.fillRect(0, 0, 240, 320, CLR_BG);
+  _tft.fillRect(0, 0, 240, 30, CLR_STATUSBG);
+  _tft.setTextDatum(MC_DATUM);
+  _tft.setTextColor(CLR_TEXT, CLR_STATUSBG);
+  _tft.drawString("Set Timer", 120, 15);
+
+  const char *labels[6] = {"1 min", "5 min", "10 min", "15 min", "20 min", "30 min"};
+  const int cols = 2, btnW = 104, btnH = 56, gapX = 8, gapY = 10;
+  const int startX = (240 - (cols * btnW + gapX)) / 2, startY = 50;
+
+  for (int i = 0; i < 6; i++)
+  {
+    int col = i % cols, row = i / cols;
+    int x = startX + col * (btnW + gapX), y = startY + row * (btnH + gapY);
+    _tft.fillRoundRect(x, y, btnW, btnH, 8, CLR_CARD);
+    _tft.drawRoundRect(x, y, btnW, btnH, 8, CLR_SUBTEXT);
+    _tft.setTextColor(CLR_TEXT, CLR_CARD);
+    _tft.setTextSize(2);
+    _tft.drawString(labels[i], x + btnW / 2, y + btnH / 2);
+  }
+  _tft.setTextSize(1);
+  _tft.setTextDatum(TL_DATUM);
+}
+
+int DisplayManager::_handleTimerSetTouch(uint16_t tx, uint16_t ty)
+{
+  if (ty < 30)
+  {
+    setScreen(Screen::HOME);
+    return -1;
+  }
+
+  static const uint32_t presetsSec[6] = {60, 300, 600, 900, 1200, 1800};
+  const int cols = 2, btnW = 104, btnH = 56, gapX = 8, gapY = 10;
+  const int startX = (240 - (cols * btnW + gapX)) / 2, startY = 50;
+
+  for (int i = 0; i < 6; i++)
+  {
+    int col = i % cols, row = i / cols;
+    int x = startX + col * (btnW + gapX), y = startY + row * (btnH + gapY);
+    if (tx >= x && tx < x + btnW && ty >= y && ty < y + btnH)
+    {
+      startTimer(presetsSec[i]);
+      return -1;
+    }
+  }
+  return -1;
+}
+
+void DisplayManager::_drawTimerRunning()
+{
+  _tft.fillRect(0, 0, 240, 320, CLR_BG);
+
+  uint32_t elapsed = (millis() - _timerStartMillis) / 1000;
+  uint32_t remaining = (elapsed >= _timerDurationSec) ? 0 : (_timerDurationSec - elapsed);
+
+  if (remaining == 0 && !_timerDone)
+  {
+    _timerDone = true;
+    _timerRunning = false;
+    if (!Config::instance().data.muted)
+    {
+      for (int i = 0; i < 3; i++)
+      {
+        AudioManager::instance().beep(1500, 40);
+        delay(120);
+      }
+    }
+  }
+
+  _tft.setTextDatum(MC_DATUM);
+
+  if (_timerDone)
+  {
+    _tft.setTextColor(CLR_ACCENT, CLR_BG);
+    _tft.setTextSize(3);
+    _tft.drawString("Time's Up!", 120, 130);
+    _tft.setTextSize(1);
+    _tft.setTextColor(CLR_SUBTEXT, CLR_BG);
+    _tft.drawString("Tap below to dismiss", 120, 170);
+  }
+  else
+  {
+    uint32_t mm = remaining / 60, ss = remaining % 60;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02lu:%02lu", (unsigned long)mm, (unsigned long)ss);
+    _tft.setTextColor(CLR_TEXT, CLR_BG);
+    _tft.setTextSize(5);
+    _tft.drawString(buf, 120, 130);
+    _tft.setTextSize(1);
+
+    float pct = 1.0f - (float)remaining / (float)_timerDurationSec;
+    const int barW = 200, barH = 10, barX = 20, barY = 180;
+    _tft.drawRoundRect(barX, barY, barW, barH, 4, CLR_SUBTEXT);
+    _tft.fillRoundRect(barX + 1, barY + 1, (int)((barW - 2) * pct), barH - 2, 3, CLR_ACCENT);
+
+    _tft.setTextColor(CLR_SUBTEXT, CLR_BG);
+    _tft.drawString("Tap below to cancel", 120, 210);
+  }
+
+  _tft.fillRoundRect(60, 260, 120, 40, 8, CLR_CARD);
+  _tft.drawRoundRect(60, 260, 120, 40, 8, CLR_RED);
+  _tft.setTextColor(CLR_RED, CLR_CARD);
+  _tft.drawString(_timerDone ? "OK" : "Cancel", 120, 280);
+  _tft.setTextDatum(TL_DATUM);
+}
+
+int DisplayManager::_handleTimerRunningTouch(uint16_t tx, uint16_t ty)
+{
+  if (ty >= 260 && ty < 300 && tx >= 60 && tx < 180)
+  {
+    _timerRunning = false;
+    _timerDone = false;
+    setScreen(Screen::HOME);
+  }
+  return -1;
 }

@@ -18,7 +18,9 @@ struct WeatherData
 enum class Screen
 {
   HOME,
-  TASK_LIST
+  TASK_LIST,
+  TIMER_SET,
+  TIMER_RUNNING
 };
 
 class DisplayManager
@@ -44,6 +46,7 @@ public:
 
   // Returns touch zone: -1=none, 0=main, 1=allTasks, 2=mute, 3=back, 4=weather
   int pollTouch();
+  void startTimer(uint32_t seconds);
 
 private:
   int _touchStartY = 0;
@@ -80,6 +83,15 @@ private:
   void _drawWifiArcs(int cx, int cy, int rssi);
   void _drawBatteryIcon(int x, int y, int pct);
   void _drawProgressBar(int x, int y, int w, int h, float pct, uint32_t color);
+  void _drawTimerSet();
+  void _drawTimerRunning();
+  int _handleTimerSetTouch(uint16_t tx, uint16_t ty);
+  int _handleTimerRunningTouch(uint16_t tx, uint16_t ty);
+
+  uint32_t _timerDurationSec = 0;
+  uint32_t _timerStartMillis = 0;
+  bool _timerRunning = false;
+  bool _timerDone = false;
 
   // Color palette (RGB565)
   static constexpr uint32_t CLR_BG = 0x1082;
