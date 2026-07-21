@@ -341,7 +341,7 @@ void setup()
   BatteryMonitor::instance().begin(/*adcPin=*/1);
   DisplayManager::instance().begin();
   AudioManager::instance().begin();
-  BacklightManager::instance().begin(/*pin=*/7, /*fullBrightness=*/255,
+  BacklightManager::instance().begin(/*pin=*/9, /*fullBrightness=*/255,
                                      /*dimAfterMs=*/60000, /*dimBrightness=*/30);
 
   // Load weather cache before WiFi connects so display shows data immediately
