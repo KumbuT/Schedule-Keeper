@@ -134,8 +134,29 @@ void TaskScheduler::_findActiveTask(std::tm *now)
 
 void TaskScheduler::tick(std::tm *now)
 {
+  const Task *prevTask = _currentTask; // captured BEFORE _findActiveTask() overwrites it
   bool wasActive = (_currentTask != nullptr);
   _findActiveTask(now);
+
+  // ── COMPLETE firing -- moved here, see why below ────────────────────────
+  // _taskActiveNow() checks minute-granularity (nowMin < startMin +
+  // durationMin), and since every task starts at :00 seconds, that window
+  // ends at the EXACT SAME wall-clock second _remainingSec would reach 0.
+  // _findActiveTask() (just above) always runs first and flips _currentTask
+  // away from a finishing task at that exact instant -- which meant the old
+  // "if (!_firedDone && _remainingSec <= 0)" check further down could never
+  // actually be reached with a non-null _currentTask: by the time
+  // remainingSec would hit 0, _currentTask was already null (or already the
+  // next task, for back-to-back scheduling with no gap). COMPLETE never
+  // fired, which is why neither the "done" sound nor the rocket-launch
+  // animation ever appeared. Firing it here, off the prevTask/_currentTask
+  // pointer comparison, catches both cases (task ends into a gap, or ends
+  // straight into the next task) and fires exactly once per transition.
+  if (prevTask && prevTask != _currentTask)
+  {
+    if (_eventCb)
+      _eventCb(*prevTask, TaskEvent::COMPLETE);
+  }
 
   if (!_currentTask)
   {
@@ -143,7 +164,7 @@ void TaskScheduler::tick(std::tm *now)
     if (wasActive)
     {
       // Task just ended, reset fire flags for next task
-      _firedStart = _firedMid = _firedOneMin = _firedDone = false;
+      _firedStart = _firedMid = _firedOneMin = false;
     }
     return;
   }
@@ -163,7 +184,6 @@ void TaskScheduler::tick(std::tm *now)
     _firedStart = false;
     _firedMid = false;
     _firedOneMin = false;
-    _firedDone = false;
   }
 
   if (!_firedStart && _elapsedSec >= 0)
@@ -184,12 +204,8 @@ void TaskScheduler::tick(std::tm *now)
       _eventCb(*_currentTask, TaskEvent::ONE_MINUTE);
     _firedOneMin = true;
   }
-  if (!_firedDone && _remainingSec <= 0)
-  {
-    if (_eventCb)
-      _eventCb(*_currentTask, TaskEvent::COMPLETE);
-    _firedDone = true;
-  }
+  // NOTE: COMPLETE no longer fires from here -- see the prevTask/_currentTask
+  // comparison at the top of this function for why.
 }
 
 float TaskScheduler::progressPct() const

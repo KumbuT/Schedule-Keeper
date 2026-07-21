@@ -117,7 +117,7 @@ async function scanWifi() {
   btn.classList.add('spinning');
 
   try {
-    const res = await fetch('/api/wifiscan');
+    const res = await fetch('/api/wifi-scan'); // matches the route registered in WebServer.cpp
     const networks = await res.json();
 
     if (!Array.isArray(networks) || networks.length === 0) {

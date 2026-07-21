@@ -351,6 +351,11 @@ function renderGroups() {
   `).join('');
 }
 
+// Keep task names short enough that the device's small TFT can always show
+// them without a hard clip -- the firmware shrinks its font for long names
+// rather than truncating, but there's still a physical limit.
+const TASK_NAME_MAX = 24;
+
 function renderTaskRow(g, t) {
   const isEditing = editingTask && editingTask.groupId === g.id && editingTask.taskId === t.id;
 
@@ -360,7 +365,8 @@ function renderTaskRow(g, t) {
         <div class="task-edit-row">
           <div>
             <label class="config-label">Name</label>
-            <input class="config-input" id="edit-name" value="${escapeHtml(t.name)}">
+            <input class="config-input" id="edit-name" value="${escapeHtml(t.name)}" maxlength="${TASK_NAME_MAX}">
+            <div style="font-size:10px;color:var(--sub);margin-top:2px">Kept short so it fits on the device screen (max ${TASK_NAME_MAX} chars)</div>
           </div>
           <div>
             <label class="config-label">Start time</label>
@@ -420,7 +426,7 @@ function saveTaskEdit(groupId, taskId) {
   const task  = group?.tasks.find(t => t.id === taskId);
   if (!task) return;
 
-  const name       = document.getElementById('edit-name').value.trim();
+  const name       = document.getElementById('edit-name').value.trim().slice(0, TASK_NAME_MAX);
   const startTime  = document.getElementById('edit-start').value;
   const duration   = parseInt(document.getElementById('edit-duration').value, 10);
   const recurrence = document.getElementById('edit-recurrence').value;
@@ -454,12 +460,12 @@ function addTask(groupId) {
   const group = scheduleData.groups.find(g => g.id === groupId);
   if (!group) return;
 
-  const name = prompt('Task name:');
+  const name = prompt(`Task name: (max ${TASK_NAME_MAX} characters)`);
   if (!name || !name.trim()) return;
 
   const newTask = {
     id: genId('t'),
-    name: name.trim(),
+    name: name.trim().slice(0, TASK_NAME_MAX),
     start_time: '09:00',
     duration_min: 10,
     audio_start: '',

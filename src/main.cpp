@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <nvs_flash.h>
 #include <ctime>
 using std::difftime;
 using std::gmtime;
@@ -253,10 +254,20 @@ void startSTA()
 
   Serial.printf("[WiFi] Connected. IP: %s\n", WiFi.localIP().toString().c_str());
 
-  // Timezone + NTP
+  // Timezone + NTP -- ORDER MATTERS here. configTime(gmtOffset_sec,
+  // daylightOffset_sec, ...) doesn't just start NTP; it also derives its own
+  // TZ string from those two numeric offsets and applies it via setenv/
+  // tzset internally. Calling it AFTER our own setenv("TZ", real POSIX
+  // string)/tzset() silently stomped that back to a bare "0,0" (i.e. UTC) --
+  // which is exactly why the clock reverted to UTC on every single boot.
+  // The /config save handler in WebServer.cpp only ever calls setenv/tzset
+  // directly (no configTime() call after it), which is why re-saving from
+  // there "fixed" it until the next reboot went through this path again.
+  // Fix: call configTime() FIRST to get NTP running, THEN apply the real
+  // timezone last so nothing overwrites it afterward.
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
   setenv("TZ", cfg.data.timezone.c_str(), 1);
   tzset();
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
 
   // Wait for valid time sync (up to 10s)
   struct tm ti;
@@ -292,29 +303,39 @@ void startAP()
 // ─── Task event handler ───────────────────────────────────────────────────────
 void onTaskEvent(const Task &task, TaskEvent event)
 {
-  if (Config::instance().data.muted)
-    return;
+  // Muting only affects AUDIO -- it used to return out of this whole
+  // function up front, which would have silently skipped the new task-
+  // complete celebration animation too (a visual, not a sound) whenever
+  // muted. Each case below gates its own AudioManager::play() call instead.
+  bool muted = Config::instance().data.muted;
 
   switch (event)
   {
   case TaskEvent::START:
     Serial.printf("[Task] START: %s\n", task.name.c_str());
-    AudioManager::instance().play(
-        task.audioStart.isEmpty() ? "/audio/starting.wav" : task.audioStart.c_str());
+    if (!muted)
+      AudioManager::instance().play(
+          task.audioStart.isEmpty() ? "/audio/starting.wav" : task.audioStart.c_str());
     break;
   case TaskEvent::MIDPOINT:
     Serial.printf("[Task] MIDPOINT: %s\n", task.name.c_str());
-    AudioManager::instance().play(
-        task.audioMid.isEmpty() ? "/audio/halfway.wav" : task.audioMid.c_str());
+    if (!muted)
+      AudioManager::instance().play(
+          task.audioMid.isEmpty() ? "/audio/halfway.wav" : task.audioMid.c_str());
     break;
   case TaskEvent::ONE_MINUTE:
     Serial.printf("[Task] ONE_MINUTE: %s\n", task.name.c_str());
-    AudioManager::instance().play("/audio/onemin.wav");
+    if (!muted)
+      AudioManager::instance().play("/audio/onemin.wav");
     break;
   case TaskEvent::COMPLETE:
     Serial.printf("[Task] COMPLETE: %s\n", task.name.c_str());
-    AudioManager::instance().play(
-        task.audioDone.isEmpty() ? "/audio/done.wav" : task.audioDone.c_str());
+    if (!muted)
+      AudioManager::instance().play(
+          task.audioDone.isEmpty() ? "/audio/done.wav" : task.audioDone.c_str());
+    // Full-screen rocket-launch celebration -- always plays regardless of
+    // mute, since it's visual, not audio.
+    DisplayManager::instance().showTaskCompleteAnimation();
     break;
   }
 }
@@ -325,6 +346,22 @@ void setup()
   Serial.begin(115200);
   delay(200);
   Serial.println("\n[Boot] Schedule Tracker starting...");
+
+  // NVS backs both WiFi's saved credentials and DisplayManager's touch
+  // calibration (via Preferences). This project's flashing history included
+  // several different builds/partition layouts (e.g. the isolation-test
+  // sketch), which can leave NVS in a state the current partition table
+  // can't open cleanly -- nvs_flash_init() reports that with a specific
+  // error code rather than crashing, so we can just reformat and retry
+  // instead of Preferences::begin() silently failing later.
+  esp_err_t nvsErr = nvs_flash_init();
+  if (nvsErr == ESP_ERR_NVS_NO_FREE_PAGES || nvsErr == ESP_ERR_NVS_NEW_VERSION_FOUND)
+  {
+    Serial.println("[Boot] NVS partition is corrupt/incompatible -- erasing and reformatting...");
+    nvs_flash_erase();
+    nvsErr = nvs_flash_init();
+  }
+  Serial.printf("[Boot] nvs_flash_init() = %d (0 = ESP_OK)\n", nvsErr);
 
   // Init LittleFS
   if (!LittleFS.begin(true))
@@ -341,7 +378,7 @@ void setup()
   BatteryMonitor::instance().begin(/*adcPin=*/1);
   DisplayManager::instance().begin();
   AudioManager::instance().begin();
-  BacklightManager::instance().begin(/*pin=*/9, /*fullBrightness=*/255,
+  BacklightManager::instance().begin(/*pin=*/7, /*fullBrightness=*/255,
                                      /*dimAfterMs=*/60000, /*dimBrightness=*/30);
 
   // Load weather cache before WiFi connects so display shows data immediately
@@ -429,39 +466,74 @@ void loop()
   }
   else
   {
-    static uint32_t lastTouch = 0;
-    if (now_ms - lastTouch > 300)
-    {
-      int zone = DisplayManager::instance().pollTouch();
-      if (zone >= 0)
-      {
-        lastTouch = now_ms;
-        BacklightManager::instance().wake();
-        if (!Config::instance().data.muted)
-          AudioManager::instance().beep(1200, 18);
+    // Edge-triggered (only act on the transition from "no touch" to "touch
+    // detected in some zone", not on every poll while a touch keeps reading
+    // as present) PLUS a small debounce requiring that zone to read
+    // consistently across a few consecutive polls before it counts as a
+    // real touch at all. Edge-triggering alone fixed repeated re-firing
+    // while a touch was held/stuck, but a single noisy/phantom poll could
+    // still register as a brand-new "rising edge" on its own -- which is
+    // exactly "the display keeps waking up without touch": this panel's
+    // touch line is confirmed marginal (needed a lower Z threshold for
+    // legitimate corner presses), so an occasional single-poll spike with
+    // no finger present is plausible, and BacklightManager::wake() lived
+    // right at that rising-edge trigger. Requiring the SAME zone across
+    // CONFIRM_POLLS consecutive loop iterations (a handful of ms at most,
+    // imperceptible for a real tap) filters that out.
+    static int candidateZone = -1;
+    static int candidateCount = 0;
+    static int lastConfirmedZone = -1; // -1 = not touching, after debounce
+    static uint32_t lastActionMs = 0;
+    const int CONFIRM_POLLS = 3;
 
-        switch (zone)
-        {
-        case 1:
-          DisplayManager::instance().setScreen(Screen::TASK_LIST);
-          break;
-        case 2:
-        {
-          auto &cfg = Config::instance();
-          cfg.data.muted = !cfg.data.muted;
-          cfg.save();
-          break;
-        }
-        case 3:
-          DisplayManager::instance().setScreen(Screen::HOME);
-          break;
-        case 4:
-          DisplayManager::instance().showClothingOverlay();
-          break;
-        case 5:
-          DisplayManager::instance().setScreen(Screen::TIMER_SET);
-          break;
-        }
+    int zone = DisplayManager::instance().pollTouch();
+
+    if (zone == candidateZone)
+    {
+      if (candidateCount < CONFIRM_POLLS)
+        candidateCount++;
+    }
+    else
+    {
+      candidateZone = zone;
+      candidateCount = 1;
+    }
+
+    bool confirmedTouching = (candidateZone >= 0 && candidateCount >= CONFIRM_POLLS);
+    bool risingEdge = confirmedTouching && (lastConfirmedZone < 0);
+    lastConfirmedZone = confirmedTouching ? candidateZone : -1;
+
+    if (risingEdge && (now_ms - lastActionMs > 300))
+    {
+      lastActionMs = now_ms;
+      BacklightManager::instance().wake();
+      if (!Config::instance().data.muted)
+        AudioManager::instance().beep(1200, 18);
+
+      switch (zone)
+      {
+      case 1:
+        DisplayManager::instance().setScreen(Screen::TASK_LIST);
+        break;
+      case 2:
+      {
+        auto &cfg = Config::instance();
+        cfg.data.muted = !cfg.data.muted;
+        cfg.save();
+        break;
+      }
+      case 3:
+        DisplayManager::instance().setScreen(Screen::HOME);
+        break;
+      case 4:
+        DisplayManager::instance().showClothingOverlay();
+        break;
+      case 5:
+        DisplayManager::instance().setScreen(Screen::TIMER_SET);
+        break;
+      case 6:
+        DisplayManager::instance().showIpToast();
+        break;
       }
     }
   }

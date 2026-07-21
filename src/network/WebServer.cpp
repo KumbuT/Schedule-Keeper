@@ -191,7 +191,21 @@ void AppWebServer::_setupRoutes()
         newCity.trim();
         if (!newCity.isEmpty()) cfg.data.city = newCity;
       }
-      if (doc["metric"].is<bool>()) cfg.data.metricUnits = doc["metric"].as<bool>();
+      // Track whether the unit system actually changed -- OWM returns the
+      // temperature pre-converted for whichever units the request asked
+      // for (see fetchWeather()'s "units=metric"/"units=imperial" query
+      // param), so flipping this setting doesn't itself convert the
+      // ALREADY-cached wx.temp value. Only the degree symbol in
+      // _drawWeatherRow() re-reads cfg.data.metricUnits live on every draw,
+      // which is why the number looked frozen while the C/F letter changed
+      // instantly -- the fix is to force an immediate re-fetch below, same
+      // as a city/key change already does.
+      bool metricChanged = false;
+      if (doc["metric"].is<bool>()) {
+        bool newMetric = doc["metric"].as<bool>();
+        metricChanged = (newMetric != cfg.data.metricUnits);
+        cfg.data.metricUnits = newMetric;
+      }
 
       // Only overwrite the OWM key if a non-empty value was submitted.
       // An absent or empty "owmkey" field means "keep the existing key" —
@@ -208,9 +222,10 @@ void AppWebServer::_setupRoutes()
 
       cfg.save();
 
-      // If city or key changed, reset weather backoff so a fetch is
-      // attempted immediately on the next loop iteration.
-      if (keyChanged || doc["city"].is<String>()) {
+      // If city, key, or units changed, reset weather backoff so a fetch is
+      // attempted immediately on the next loop iteration -- for a units
+      // change this is what actually converts wx.temp, not just the symbol.
+      if (keyChanged || doc["city"].is<String>() || metricChanged) {
         wxState        = WxState::OK;
         wxBackoffUntil = 0;
         lastWxFetch    = 0;

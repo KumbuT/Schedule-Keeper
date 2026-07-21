@@ -63,7 +63,10 @@ private:
   bool _firedStart   = false;
   bool _firedMid     = false;
   bool _firedOneMin  = false;
-  bool _firedDone    = false;
+  // No _firedDone -- COMPLETE now fires exactly once per active->inactive
+  // (or active->next-task) transition, off a pointer comparison in tick(),
+  // rather than a flag gated on _remainingSec <= 0 (see tick()'s comment
+  // for why that could never actually trigger).
 
   EventCallback _eventCb;
 };
