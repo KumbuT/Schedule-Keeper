@@ -3,6 +3,8 @@
 #include <Preferences.h>
 #include <vector>
 #include "../tasks/TaskScheduler.h"
+#include "Theme.h"   // shared CLR_* palette (moved out of this class)
+#include "Widget.h"  // retained-mode widget framework + concrete widgets
 
 struct WeatherData
 {
@@ -32,6 +34,7 @@ public:
   void begin();
   void update(struct tm *now);
   void setScreen(Screen s);
+  void showApSetupScreen(const String &ssid, const String &pass, const String &url); // First-boot Wi-Fi setup instructions
   void showClothingOverlay();       // Draws and arms the overlay, returns immediately
   void showIpToast();               // Draws a temporary "IP: x.x.x.x" toast, returns immediately
   void showTaskCompleteAnimation(); // Full-screen rocket-launch celebration, ~4s, plays once per task completion
@@ -123,7 +126,30 @@ private:
   TFT_eSprite _sprite;
   bool _spriteOk = false;
 
+  // ── Dirty-rectangle compositor state ──────────────────────────────────────
+  // HOME and TASK_LIST render region-by-region: each top strip is redrawn and
+  // pushed via _pushRegion() only when its own source data changed since the
+  // last frame. These cache the last-drawn values so update() can detect a
+  // change cheaply. _forceFullRedraw repaints every region once (set on every
+  // setScreen(), and true at boot) so a screen switch always fully paints.
+  bool _forceFullRedraw = true;
+  StatusBarWidget _statusBar;       // top strip (clock/wifi/battery), widget model
+  DelegateWidget _weatherRow;       // animated weather band -> _drawWeatherRow()
+  DelegateWidget _currentTask;      // animated task card -> _drawCurrentTask()
+  DelegateWidget _taskList;         // full-screen task list -> _drawTaskList()
+  DelegateWidget _timerSet;         // full-screen timer presets -> _drawTimerSet()
+  DelegateWidget _timerRunScreen;   // full-screen running timer -> _drawTimerRunning()
+  NavBarWidget _navBar;             // HOME nav bar, migrated to the widget model
+  bool _overlayAwaitingRelease = false; // ignore the still-held opening tap until the finger lifts
+
   void _present();                                        // push the finished sprite frame to the real panel
+
+  // Rotation-aware partial-push primitive: copies one LOGICAL (240x320) sprite
+  // rectangle onto the real (320x240) panel, applying the same 90/270 rotation
+  // pushRotated() would, but for that sub-region only. This is the single place
+  // the rotation is handled for the dirty-rectangle renderer. Pushed row-by-row
+  // via pushImage() from a small stack line buffer (no full-frame allocation).
+  void _pushRegion(int lx, int ly, int w, int h);
   bool _getLogicalTouch(uint16_t &lx, uint16_t &ly);       // physical getTouch() -> logical (sprite-space) coords
 
   // ───────────────────────────────────────────────────────────────────────
@@ -170,32 +196,35 @@ private:
   int _contentHeight = 0;  // total height of task list content (set by _drawTaskList)
   bool _touchDown = false; // true while finger is held down on TASK_LIST screen
   int _lastTouchY = 0;     // previous frame's touch Y, for delta calculation
+  // True right after entering TASK_LIST until the touch that opened it (if
+  // still physically down at that instant) is released. Without this,
+  // updateTaskListScroll() would treat that still-down finger as a brand
+  // new tap gesture the moment the screen switches, and toggle whatever
+  // group happens to sit under the "All Tasks" nav button's coordinates --
+  // a ghost tap the user never actually made on this screen. See setScreen()
+  // and updateTaskListScroll().
+  bool _taskListAwaitingRelease = false;
   bool _groupExpanded[16] = {};
   float _gaugeAnimT = 0.0f; // Seconds elapsed — drives gauge bob and arc pulse
 
-  // Drawing methods (all draw onto _sprite)
-  void _drawStatusBar(struct tm *now);
+  // Drawing methods (all draw onto _sprite). Status bar migrated to
+  // StatusBarWidget (see Widget.h).
   void _drawWeatherRow();
   void _drawCurrentTask();
-  void _drawNavBar();
+  // Compositor helper: if `full` force the widget dirty; then, if it is dirty
+  // and visible, draw it into the sprite and push just its bounds. Clears the
+  // dirty flag. The generic path all migrated widgets go through.
+  void _composite(Widget &w, bool full);
   void _drawTaskList();
   void _drawClothingOverlay(const std::vector<struct ClothingItem> &items);
   void _handleTaskListTap(int ty);
 
-  // Small pictogram for each ClothingAdvisor code (CT/JK/TS/PT/SH/BT/SN/UM/
-  // !!/SC/GL/SG/SS/HY) -- replaces printing the raw 2-letter code as text.
-  // Those codes existed only because real emoji have no glyphs in the
-  // compiled bitmap fonts; drawing small shapes from primitives (same
-  // approach as the weather icons and nav bar glyphs) gets an actual
-  // picture instead of a letter abbreviation, with no font/asset loading
-  // involved. cx/cy is the icon's center; roughly a 20x20px footprint.
-  // Each icon picks its own thematic accent color internally rather than
-  // using a single passed-in color, so the list reads as colorful at a
-  // glance rather than a column of same-colored silhouettes; bgColor is the
-  // row's current background (alternating CLR_CARD/CLR_BG) and is used to
-  // cut negative-space details -- V-necks, a thumb notch, the exclamation
-  // mark, a shoe sole line -- so shapes don't read as solid blobs.
-  void _drawClothingIcon(const String &code, int cx, int cy, uint32_t bgColor);
+  // Draws one small clothing pictogram centered at (cx,cy), sized to fit an
+  // roughly `size`x`size` box, for a single ClothingAdvisor code (CT/JK/TS/
+  // PT/SH/BT/SN/UM/!!/SC/GL/SG/SS/HY). Primitives-only, same approach as the
+  // weather icons. Used by _drawClothingOverlay to render a list of
+  // icon+label rows (one row per recommended item).
+  void _drawClothingIcon(const String &code, int cx, int cy, int size);
 
   // Time-remaining visual — replaces the old ring/arc dial entirely. The
   // ring kept getting reported as having a "background issue" (the unfilled
@@ -220,6 +249,15 @@ private:
   // bobbing/swaying limbs, and a drifting "Zzz".
   void _drawSleepyAstronaut(int cx, int cy);
 
+  // Small floating companion for the astronaut scene -- a cat in a tiny
+  // round helmet with its ears poking out above the rim. Deliberately no
+  // face at all (same opaque-visor trick as the astronaut) since the
+  // earlier stand-alone cat's face/ear proportions were the likely reason
+  // it read as "hideous"; here it's a small secondary character, not the
+  // focal point, and animates on its own independent phase so it doesn't
+  // move in lockstep with the astronaut.
+  void _drawAstroCat(int cx, int cy);
+
   // Scattered small twinkling dots across a vertical band -- shared
   // backdrop for the active-task rocket-race view, the idle astronaut
   // scene, and the task-complete launch animation, so the whole card reads
@@ -228,9 +266,7 @@ private:
   // blink in sync.
   void _drawStarfield(int top, int bottom);
 
-  // Widget helpers
-  void _drawWifiArcs(int cx, int cy, int rssi);
-  void _drawBatteryIcon(int x, int y, int pct);
+  // Widget helpers (wifi + battery moved into StatusBarWidget, see Widget.h)
   void _drawProgressBar(int x, int y, int w, int h, float pct, uint32_t color);
   void _drawTimerSet();
   void _drawTimerRunning();
@@ -249,24 +285,12 @@ private:
   // (default GLCD font: 6px/char per size step) fits within maxWidthPx --
   // used so long task names shrink instead of clipping.
   int _fitTextSize(const String &s, int maxSize, int maxWidthPx);
+  String _truncateToFit(const String &s, int size, int maxWidthPx);
 
   uint32_t _timerDurationSec = 0;
   uint32_t _timerStartMillis = 0;
   bool _timerRunning = false;
   bool _timerDone = false;
 
-  // Color palette (RGB565)
-  static constexpr uint32_t CLR_BG = 0x1082;
-  static constexpr uint32_t CLR_CARD = 0x2965; // was 0x2104 -- a bit more saturated for a livelier feel
-  static constexpr uint32_t CLR_ACCENT = 0x07FF; // cyan
-  static constexpr uint32_t CLR_TEXT = 0xFFFF;
-  static constexpr uint32_t CLR_SUBTEXT = 0xAD75; // gray
-  static constexpr uint32_t CLR_GREEN = 0x07E0;
-  static constexpr uint32_t CLR_YELLOW = 0xFFE0;
-  static constexpr uint32_t CLR_RED = 0xF800;
-  static constexpr uint32_t CLR_ORANGE = 0xFDA0;
-  static constexpr uint32_t CLR_PINK = 0xFE19;
-  static constexpr uint32_t CLR_BAR_BG = 0x39C7;
-  static constexpr uint32_t CLR_STATUSBG = 0x0841;
-  static constexpr uint32_t CLR_CLOUD = 0xC618; // weather-icon cloud body (TFT_SILVER)
+  // Color palette (CLR_*) now lives in Theme.h so the Widget classes share it.
 };

@@ -298,6 +298,11 @@ void startAP()
   dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
   Serial.println("[WiFi] AP mode: ScheduleTracker-Setup");
   Serial.println("[WiFi] Portal: http://192.168.4.1");
+
+  // Show the same instructions on the TFT so a user without a serial console
+  // knows which network to join and where to point their browser.
+  DisplayManager::instance().showApSetupScreen("ScheduleTracker-Setup",
+                                               "setup1234", "192.168.4.1");
 }
 
 // ─── Task event handler ───────────────────────────────────────────────────────
@@ -379,7 +384,7 @@ void setup()
   DisplayManager::instance().begin();
   AudioManager::instance().begin();
   BacklightManager::instance().begin(/*pin=*/7, /*fullBrightness=*/255,
-                                     /*dimAfterMs=*/60000, /*dimBrightness=*/30);
+                                     /*dimAfterMs=*/60000, /*dimBrightness=*/0);
 
   // Load weather cache before WiFi connects so display shows data immediately
   loadWeatherCache();
@@ -409,7 +414,10 @@ void loop()
 {
   // DNS for captive portal
   if (apMode)
+  {
     dnsServer.processNextRequest();
+    BacklightManager::instance().wake(); // keep the setup screen lit during setup
+  }
 
   uint32_t now_ms = millis();
 
@@ -421,7 +429,9 @@ void loop()
     time_t t = time(nullptr);
     std::tm *tm_now = localtime(&t);
     TaskScheduler::instance().tick(tm_now);
-    if (!DisplayManager::instance().overlayActive())
+    // In AP setup mode the setup screen owns the display -- don't repaint the
+    // home screen over it.
+    if (!apMode && !DisplayManager::instance().overlayActive())
       DisplayManager::instance().update(tm_now);
   }
   // ── WebSocket broadcast every 1s ───────────────────────────────────────────
@@ -451,7 +461,10 @@ void loop()
   // ── Backlight auto-dim ─────────────────────────────────────────────────────
   BacklightManager::instance().tick();
 
-  // ── Touch input ─────────────────────────────────────────────
+  // ── Touch input (skipped in AP setup mode -- the setup screen owns the
+  // display and there's nothing to navigate until Wi-Fi is configured) ──
+  if (!apMode)
+  {
   DisplayManager::instance().updateTaskListScroll(); // drag-scroll, every iteration
   if (DisplayManager::instance().consumeDirty())
   {
@@ -480,10 +493,24 @@ void loop()
     // right at that rising-edge trigger. Requiring the SAME zone across
     // CONFIRM_POLLS consecutive loop iterations (a handful of ms at most,
     // imperceptible for a real tap) filters that out.
+    //
+    // NOTE: this used to also gate on "now_ms - lastActionMs > 300" (a
+    // cooldown between actions) on top of the above. That's what caused a
+    // real bug: two genuinely separate taps arriving within 300ms of each
+    // other (e.g. dismissing the task list, then immediately tapping the
+    // timer nav icon) would confirm a rising edge for the SECOND tap, but
+    // lastConfirmedZone got marked "consumed" for it regardless of whether
+    // the cooldown blocked the switch(zone) below -- so the second tap's
+    // action was silently dropped and could never re-fire for that same
+    // touch-down (risingEdge requires a fresh release-then-press cycle).
+    // From the outside this looked like "I tapped X, nothing happened, and
+    // I'm stuck on the previous screen." The release-required edge trigger
+    // plus the 3-poll same-zone requirement above already do the real job
+    // of rejecting noise/phantom touches, so the extra cooldown was both
+    // redundant and actively harmful -- removed.
     static int candidateZone = -1;
     static int candidateCount = 0;
     static int lastConfirmedZone = -1; // -1 = not touching, after debounce
-    static uint32_t lastActionMs = 0;
     const int CONFIRM_POLLS = 3;
 
     int zone = DisplayManager::instance().pollTouch();
@@ -503,9 +530,8 @@ void loop()
     bool risingEdge = confirmedTouching && (lastConfirmedZone < 0);
     lastConfirmedZone = confirmedTouching ? candidateZone : -1;
 
-    if (risingEdge && (now_ms - lastActionMs > 300))
+    if (risingEdge)
     {
-      lastActionMs = now_ms;
       BacklightManager::instance().wake();
       if (!Config::instance().data.muted)
         AudioManager::instance().beep(1200, 18);
@@ -537,6 +563,7 @@ void loop()
       }
     }
   }
+  } // end if(!apMode) — touch/overlay handling
 
   // ── Audio ──────────────────────────────────────────────────────────────────
   AudioManager::instance().loop();

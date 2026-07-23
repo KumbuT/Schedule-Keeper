@@ -18,7 +18,7 @@ using std::tm;
 // Compact 12-hour formatter for secondary time references (next-task strip,
 // task list rows) -- "A"/"P" instead of full "AM"/"PM" to save width those
 // tighter layouts don't have. The primary clock in the status bar still
-// spells out the full "AM"/"PM" (see _drawStatusBar).
+// spells out the full "AM"/"PM" (see StatusBarWidget in Widget.h).
 static void format12hShort(int hour24, int minute, char *buf, size_t n)
 {
   int h = hour24 % 12;
@@ -55,7 +55,16 @@ void DisplayManager::begin()
   // middle, shoving almost everything off-canvas.
   _tft.setPivot(_tft.width() / 2, _tft.height() / 2); // real screen center, e.g. (160,120) at rotation 1
 
-  _sprite.setColorDepth(16); // match the app's existing RGB565 color constants exactly
+  // 8-bit canvas halves sprite RAM: 240*320*2 = 150 KB at 16bpp -> 75 KB at
+  // 8bpp. This is the single largest allocation on the C3 (no PSRAM), so it is
+  // the biggest memory lever by far. 8bpp uses TFT_eSPI's 3-3-2 color format
+  // (RRRGGGBB): every draw color and every readPixel() still uses ordinary
+  // RGB565 values (so _pushRegion() and all the CLR_* constants are unchanged),
+  // they're just quantized to 256 levels on store. For this flat-color UI that
+  // is visually close; the only real cost is coarser blues (2 bits) -- so cyan/
+  // navy/pink shift the most. If any color reads wrong on-device, revert this
+  // single line to setColorDepth(16) (costs the 75 KB back, no other changes).
+  _sprite.setColorDepth(8);
   void *buf = _sprite.createSprite(SPRITE_W, SPRITE_H);
   _spriteOk = (buf != nullptr);
   if (!_spriteOk)
@@ -71,6 +80,23 @@ void DisplayManager::begin()
 
   for (int i = 0; i < 16; i++)
     _groupExpanded[i] = true; // All expanded by default
+
+  // Delegating widgets for the two large animated HOME elements. Their draw
+  // code stays in DisplayManager (_drawWeatherRow / _drawCurrentTask); the
+  // lambdas ignore the passed canvas and draw into _sprite as before. Marked
+  // alwaysRepaint so the compositor redraws + pushes them each tick.
+  _weatherRow.configure(Rect{0, STATUS_BAR_H, SPRITE_W, WEATHER_ROW_H},
+                        [this](TFT_eSprite &) { _drawWeatherRow(); }, /*always=*/true);
+  _currentTask.configure(Rect{0, STATUS_BAR_H + WEATHER_ROW_H, SPRITE_W,
+                              268 - (STATUS_BAR_H + WEATHER_ROW_H)},
+                         [this](TFT_eSprite &) { _drawCurrentTask(); }, /*always=*/true);
+
+  // Full-screen screens (each owns the whole canvas). TASK_LIST + TIMER_SET are
+  // static (repaint on entry / when marked dirty); TIMER_RUNNING animates.
+  const Rect fullScreen{0, 0, SPRITE_W, SPRITE_H};
+  _taskList.configure(fullScreen, [this](TFT_eSprite &) { _drawTaskList(); }, /*always=*/false);
+  _timerSet.configure(fullScreen, [this](TFT_eSprite &) { _drawTimerSet(); }, /*always=*/false);
+  _timerRunScreen.configure(fullScreen, [this](TFT_eSprite &) { _drawTimerRunning(); }, /*always=*/true);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,11 +186,16 @@ bool DisplayManager::_getRuntimeTouch(uint16_t &screenX, uint16_t &screenY)
   uint16_t z2 = _tft.getTouchRawZ();
   if (z2 <= Z_MIN)
   {
-    // Logged (not silent) so a serial capture during a "taps aren't
-    // registering" session shows whether presses are crossing the first
-    // threshold at all, or dying on the confirm step -- two very different
-    // problems that look identical from the outside.
+    // Was unconditionally logged during the touch-debugging saga (useful
+    // then, since it showed whether presses crossed the first threshold at
+    // all vs. dying on the confirm step) -- but this branch is hit on
+    // essentially every marginal poll in normal use, so it flooded Serial.
+    // Now compiled out unless TOUCH_DEBUG_LOG is defined (add
+    // `-D TOUCH_DEBUG_LOG=1` as a build flag if this level of detail is
+    // ever needed again).
+#ifdef TOUCH_DEBUG_LOG
     Serial.printf("[Touch] z1=%u crossed threshold but z2=%u didn't confirm -- dropped\n", z1, z2);
+#endif
     return false;
   }
 
@@ -188,7 +219,9 @@ bool DisplayManager::_getRuntimeTouch(uint16_t &screenX, uint16_t &screenY)
 
   screenX = (uint16_t)xx;
   screenY = (uint16_t)yy;
+#ifdef TOUCH_DEBUG_LOG
   Serial.printf("[Touch] z1=%u z2=%u raw=(%u,%u) -> screen=(%u,%u)\n", z1, z2, rx, ry, screenX, screenY);
+#endif
   return true;
 }
 
@@ -201,7 +234,78 @@ void DisplayManager::_present()
 {
   if (!_spriteOk)
     return;
-  _sprite.pushRotated(SPRITE_ROTATE_DEG);
+  // Push the whole logical canvas through the same region primitive the
+  // dirty-rectangle renderer uses. Behaviour is identical to the old
+  // pushRotated() call -- this routes the full frame through _pushRegion() so
+  // that primitive (and its rotation math + byte order) is exercised and
+  // verifiable on-device before any partial-update paths depend on it.
+  _pushRegion(0, 0, SPRITE_W, SPRITE_H);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Copy one LOGICAL (240x320) sprite rectangle onto the real (320x240) panel,
+// applying this panel's 90/270 rotation for that sub-region only.
+//
+// Mapping (ground truth: the inverse of _getLogicalTouch()):
+//   90 deg : logical (lx,ly) -> panel (px,py) = (SPRITE_H-1-ly, lx)
+//   270 deg: logical (lx,ly) -> panel (px,py) = (ly, SPRITE_W-1-lx)
+// The rotated sprite exactly fills the panel (240x320 -> 320x240, centered at
+// offset 0), so there is no centering fudge.
+//
+// We build the panel image one panel-row at a time into a small stack buffer
+// and pushImage() it, so memory is bounded by the panel width (<=320 px) rather
+// than the region area -- a full-screen region never allocates a second frame.
+// ─────────────────────────────────────────────────────────────────────────────
+void DisplayManager::_pushRegion(int lx, int ly, int w, int h)
+{
+  if (!_spriteOk || w <= 0 || h <= 0)
+    return;
+
+  // Clip the logical rect to the canvas.
+  if (lx < 0) { w += lx; lx = 0; }
+  if (ly < 0) { h += ly; ly = 0; }
+  if (lx + w > SPRITE_W) w = SPRITE_W - lx;
+  if (ly + h > SPRITE_H) h = SPRITE_H - ly;
+  if (w <= 0 || h <= 0)
+    return;
+
+  // pushImage() sends raw 16-bit words; readPixel() returns canonical RGB565,
+  // so swap bytes to match the panel's wire order (same convention the rest of
+  // the app's colors assume). If colors ever come out wrong on-device, flip
+  // this to false. Restored to the library default (false) at the end.
+  _tft.setSwapBytes(true);
+
+  static uint16_t line[SPRITE_H]; // one panel row; max length = SPRITE_H (320)
+
+  if (SPRITE_ROTATE_DEG == 90)
+  {
+    // Panel rect: x0 = SPRITE_H-ly-h, y0 = lx, width = h, height = w.
+    const int x0 = SPRITE_H - ly - h;
+    const int y0 = lx;
+    for (int ty = 0; ty < w; ty++) // one panel row per logical column
+    {
+      const int lxSrc = lx + ty;                     // logical x for this panel row
+      for (int tx = 0; tx < h; tx++)                 // across the panel row
+        line[tx] = _sprite.readPixel(lxSrc, ly + h - 1 - tx);
+      _tft.pushImage(x0, y0 + ty, h, 1, line);
+    }
+  }
+  else // 270
+  {
+    // Panel rect: x0 = ly, y0 = SPRITE_W-lx-w, width = h, height = w.
+    const int x0 = ly;
+    const int y0 = SPRITE_W - lx - w;
+    for (int ty = 0; ty < w; ty++)
+    {
+      const int py = y0 + ty;
+      const int lxSrc = SPRITE_W - 1 - py;
+      for (int tx = 0; tx < h; tx++)
+        line[tx] = _sprite.readPixel(lxSrc, ly + tx);
+      _tft.pushImage(x0, py, h, 1, line);
+    }
+  }
+
+  _tft.setSwapBytes(false); // restore library default
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,176 +342,86 @@ void DisplayManager::update(std::tm *now)
   if (!_spriteOk)
     return;
 
+  // An overlay (clothing / IP toast / task-complete) owns the whole screen
+  // while active. Never repaint the screen underneath here -- a partial region
+  // push would smear the underlying screen over the overlay. tickOverlay()
+  // clears _overlayKind BEFORE it calls update() to restore the real screen,
+  // so the restore path is unaffected by this guard.
+  if (_overlayKind != OverlayKind::NONE)
+    return;
+
   // Drives the dial's urgency pulse and the weather icon's animation. This
   // was declared but never incremented before -- both effects were frozen
   // on their very first frame the whole time. update() runs ~once/second
   // (see main.cpp's 1-second tick), so +1.0 here is "elapsed seconds".
   _gaugeAnimT += 1.0f;
 
-  if (_screen == Screen::TIMER_SET)
-  {
-    _drawTimerSet();
-    _present();
-    return;
-  }
-  if (_screen == Screen::TIMER_RUNNING)
-  {
-    _drawTimerRunning();
-    _present();
-    return;
-  }
-  // 1. Draw your status bar at the top
-  _drawStatusBar(now);
+  const bool full = _forceFullRedraw;
+  _forceFullRedraw = false;
 
-  // 2. Refresh the weather row layout
-  _drawWeatherRow();
+  // Full-screen screens: each is a single delegating widget (draw code kept in
+  // DisplayManager). TIMER_SET is static (paints on entry only), TIMER_RUNNING
+  // animates (alwaysRepaint => every tick), TASK_LIST repaints on entry or when
+  // its scroll/expansion changed (its touch handlers mark _taskList dirty).
+  if (_screen == Screen::TIMER_SET)     { _composite(_timerSet, full);     return; }
+  if (_screen == Screen::TIMER_RUNNING) { _composite(_timerRunScreen, full); return; }
+  if (_screen == Screen::TASK_LIST)     { _composite(_taskList, full);     return; }
 
-  // 3. Render whatever view/card is active on the screen
+  // ── HOME: dirty-rectangle compositor ─────────────────────────────────────
+  // Each region is redrawn (into the sprite, by its existing _drawXxx method)
+  // and pushed to the panel ONLY when its source data changed.
+
+  // 1. Status bar -- widget model. The setters change-detect (clock by
+  // hour/min, date string, battery %, wifi bars), so _composite() repaints +
+  // pushes the strip only when a displayed value actually changed.
+  {
+    char dateBuf[12];
+    strftime(dateBuf, sizeof(dateBuf), "%a %d %b", now);
+    _statusBar.setClock(now->tm_hour, now->tm_min);
+    _statusBar.setDate(dateBuf);
+    _statusBar.setBattery(BatteryMonitor::instance().percentage());
+    _statusBar.setWifi(WiFi.isConnected() ? WiFi.RSSI() : 0);
+    _composite(_statusBar, full);
+  }
+
+  // 2. Weather row -- animated delegating widget (draw code stays in
+  // _drawWeatherRow). alwaysRepaint => _composite repaints + pushes it every
+  // tick so the weather glyph keeps animating; only its region is pushed.
+  _composite(_weatherRow, full);
+
   if (_screen == Screen::HOME)
   {
-    _drawCurrentTask();
-    _drawNavBar();
-  }
-  else if (_screen == Screen::TASK_LIST)
-  {
-    _drawTaskList();
-  }
+    // 3a. Current-task card -- animated delegating widget (draw code stays in
+    //     _drawCurrentTask). alwaysRepaint => composited (repainted + pushed)
+    //     every tick; only its own region is pushed, not the whole frame.
+    _composite(_currentTask, full);
 
-  _present();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Bottom nav bar (y=268..320) — Tasks / Timer / Mute.
-// This was declared in the header but never implemented or called, which is
-// why none of these ever showed up: the row simply never got drawn. Column
-// widths (80px each) and the y>262 threshold match pollTouch()'s existing
-// HOME-screen zone logic (1=Tasks, 5=Timer, 2=Mute) further down in this
-// file -- only home screen; TASK_LIST/TIMER_SET/TIMER_RUNNING use their own
-// full-height layouts and don't call this.
-// ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawNavBar()
-{
-  const int y = 268, h = 320 - y;
-  const int midY = y + h / 2;
-  bool muted = Config::instance().data.muted;
-
-  _sprite.fillRect(0, y, 240, h, CLR_STATUSBG);
-  _sprite.drawFastHLine(0, y, 240, CLR_SUBTEXT);
-  _sprite.drawFastVLine(80, y, h, CLR_SUBTEXT);
-  _sprite.drawFastVLine(160, y, h, CLR_SUBTEXT);
-
-  // Icons only, no labels, drawn from primitives -- there's no icon font
-  // compiled in (only plain bitmap text), so these are hand-drawn shapes.
-
-  // ── Tasks: a small 3-row checklist (green) ────────────────────────────────
-  {
-    const int cx = 40;
-    for (int row = -1; row <= 1; row++)
-    {
-      int ry = midY + row * 7;
-      _sprite.drawRect(cx - 13, ry - 2, 5, 5, CLR_GREEN);
-      _sprite.drawFastHLine(cx - 5, ry, 13, CLR_GREEN);
-    }
-  }
-
-  // ── Timer: a clock face with hands and a top stem (orange) ───────────────
-  {
-    const int cx = 120;
-    _sprite.drawCircle(cx, midY, 10, CLR_ORANGE);
-    _sprite.fillRect(cx - 1, midY - 13, 3, 3, CLR_ORANGE); // stem/button
-    _sprite.drawLine(cx, midY, cx, midY - 6, CLR_ORANGE);  // minute hand
-    _sprite.drawLine(cx, midY, cx + 5, midY, CLR_ORANGE);  // hour hand
-  }
-
-  // ── Mute: speaker cone, plus sound-wave chevrons or a slash when muted ────
-  {
-    const int cx = 200;
-    uint32_t color = muted ? CLR_YELLOW : CLR_ACCENT;
-    _sprite.fillRect(cx - 14, midY - 3, 4, 6, color);
-    _sprite.fillTriangle(cx - 10, midY - 3, cx - 10, midY + 3, cx - 2, midY + 8, color);
-    _sprite.fillTriangle(cx - 10, midY - 3, cx - 2, midY + 8, cx - 2, midY - 8, color);
-    if (muted)
-    {
-      _sprite.drawLine(cx - 14, midY - 10, cx + 6, midY + 10, CLR_RED);
-      _sprite.drawLine(cx - 14, midY + 10, cx + 6, midY - 10, CLR_RED);
-    }
-    else
-    {
-      _sprite.drawLine(cx + 2, midY - 6, cx + 8, midY, color);
-      _sprite.drawLine(cx + 8, midY, cx + 2, midY + 6, color);
-      _sprite.drawLine(cx + 6, midY - 10, cx + 14, midY, color);
-      _sprite.drawLine(cx + 14, midY, cx + 6, midY + 10, color);
-    }
+    // 3b. Nav bar -- migrated to the widget model. setMuted() marks it dirty
+    // only on a real change; _composite() draws it + pushes its bounds when
+    // dirty (or unconditionally on a full refresh).
+    _navBar.setMuted(Config::instance().data.muted);
+    _composite(_navBar, full);
   }
 }
-// ─────────────────────────────────────────────────────────────────────────────
-// WiFi Arc Renderer
-// Draws 4 quarter-circle arcs (bottom arc style, like Android/iOS)
-// cx, cy = anchor point (base center of arc stack)
-// ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawWifiArcs(int cx, int cy, int rssi)
-{
-  int bars = 0;
-  if (rssi == 0)
-    bars = 0; // disconnected
-  else if (rssi >= -55)
-    bars = 4;
-  else if (rssi >= -67)
-    bars = 3;
-  else if (rssi >= -78)
-    bars = 2;
-  else
-    bars = 1;
 
-  if (rssi == 0)
-  {
-    _sprite.drawLine(cx - 5, cy - 5, cx + 5, cy + 5, CLR_RED);
-    _sprite.drawLine(cx + 5, cy - 5, cx - 5, cy + 5, CLR_RED);
+// ─────────────────────────────────────────────────────────────────────────────
+// Compositor helper -- the generic path every migrated widget goes through.
+// `full` forces a repaint (screen switch / overlay restore). Otherwise the
+// widget's own dirty flag (set by its change-detecting setters) decides. When
+// it does repaint, only the widget's bounds are pushed to the panel.
+// ─────────────────────────────────────────────────────────────────────────────
+void DisplayManager::_composite(Widget &w, bool full)
+{
+  if (full || w.alwaysRepaint())
+    w.markDirty();
+  if (!w.isVisible() || !w.isDirty())
     return;
-  }
-
-  // 4 vertical bars, shortest→tallest left→right, baseline-aligned — the
-  // familiar phone/wifi signal-strength meter. Replaces the old concentric
-  // arc "fan", which came out oriented wrong on this panel.
-  const int barW = 3, gap = 2;
-  const int heights[4] = {4, 7, 10, 13};
-  const int baseline = cy + 7; // bottom edge shared by all bars
-  const int totalW = 4 * barW + 3 * gap;
-  int x = cx - totalW / 2;
-
-  for (int i = 0; i < 4; i++)
-  {
-    uint32_t color = (i < bars) ? CLR_ACCENT : CLR_SUBTEXT;
-    _sprite.fillRect(x, baseline - heights[i], barW, heights[i], color);
-    x += barW + gap;
-  }
+  w.draw(_sprite);
+  const Rect &b = w.bounds();
+  _pushRegion(b.x, b.y, b.w, b.h);
+  w.clearDirty();
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Battery Icon
-// ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawBatteryIcon(int x, int y, int pct)
-{
-  uint32_t fillColor = pct > 50 ? CLR_GREEN : (pct > 20 ? CLR_YELLOW : CLR_RED);
-
-  _sprite.drawRect(x, y, 22, 10, CLR_TEXT);
-  _sprite.fillRect(x + 22, y + 3, 2, 4, CLR_TEXT); // nub
-
-  int fillW = std::max(1, (int)(pct / 100.0f * 20));
-  _sprite.fillRect(x + 1, y + 1, fillW, 8, fillColor);
-
-  // Right-aligned to a fixed edge instead of a left cursor after the icon --
-  // a left cursor let the text's right edge drift depending on whether pct
-  // was 2 or 3 digits, which is why the widget never looked flush against
-  // the screen edge no matter where x was set.
-  char buf[6];
-  snprintf(buf, sizeof(buf), "%d%%", pct);
-  _sprite.setTextColor(CLR_TEXT, CLR_STATUSBG);
-  _sprite.setTextSize(1);
-  _sprite.setTextDatum(TR_DATUM);
-  _sprite.drawString(buf, 236, y + 1);
-  _sprite.setTextDatum(TL_DATUM);
-}
+// WiFi signal bars and the battery gauge moved into StatusBarWidget (Widget.h).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Progress Bar
@@ -423,47 +437,8 @@ void DisplayManager::_drawProgressBar(int x, int y, int w, int h, float pct, uin
     _sprite.fillCircle(x + filled, y + h / 2, h / 2, color);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Status Bar (top STATUS_BAR_H px — grown from the original 20px to fit a
-// bigger clock; WiFi/battery icon anchors and the date's y both moved down
-// to stay centered in the taller bar).
-// ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawStatusBar(std::tm *now)
-{
-  _sprite.fillRect(0, 0, 240, STATUS_BAR_H, CLR_STATUSBG);
-
-  // WiFi bars — left side
-  int rssi = WiFi.isConnected() ? WiFi.RSSI() : 0;
-  _drawWifiArcs(14, 10, rssi);
-
-  // Battery — right side. Box position is fixed; the percentage text next
-  // to it is now right-aligned to the screen edge inside _drawBatteryIcon
-  // itself, so the whole widget reads as flush-right regardless of digits.
-  _drawBatteryIcon(184, 7, BatteryMonitor::instance().percentage());
-
-  // Time — center, 12-hour with AM/PM, bigger per request. Computed by hand
-  // rather than via strftime's %I/%l: %I zero-pads (e.g. "01:05"), and %l
-  // (no leading zero) isn't reliably supported by the ESP32 toolchain's libc.
-  int hour12 = now->tm_hour % 12;
-  if (hour12 == 0)
-    hour12 = 12;
-  char timeBuf[12];
-  snprintf(timeBuf, sizeof(timeBuf), "%d:%02d %s", hour12, now->tm_min,
-           now->tm_hour < 12 ? "AM" : "PM");
-  _sprite.setTextDatum(TC_DATUM);
-  _sprite.setTextColor(CLR_TEXT, CLR_STATUSBG);
-  _sprite.setTextSize(2);
-  _sprite.drawString(timeBuf, 120, 2);
-
-  // Date — below time, bumped a size too
-  char dateBuf[12];
-  strftime(dateBuf, sizeof(dateBuf), "%a %d %b", now);
-  _sprite.setTextColor(CLR_SUBTEXT, CLR_STATUSBG);
-  _sprite.setTextSize(1);
-  _sprite.drawString(dateBuf, 120, 19);
-
-  _sprite.setTextDatum(TL_DATUM);
-}
+// Status bar drawing moved into StatusBarWidget (Widget.h); DisplayManager
+// just feeds it clock/date/battery/wifi values in update() and composites it.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Weather Row (y=STATUS_BAR_H to y=STATUS_BAR_H+WEATHER_ROW_H)
@@ -473,7 +448,10 @@ void DisplayManager::_drawStatusBar(std::tm *now)
 void DisplayManager::_drawWeatherRow()
 {
   const int top = STATUS_BAR_H;
-  _sprite.fillRect(0, top, 240, WEATHER_ROW_H, CLR_CARD);
+  // Weather band background removed per request: fill with the main background
+  // (CLR_BG) instead of the old CLR_CARD "band", so it blends in. All the text
+  // background colors below follow to CLR_BG for the same reason.
+  _sprite.fillRect(0, top, 240, WEATHER_ROW_H, CLR_BG);
 
   if (!weather.valid)
   {
@@ -482,28 +460,28 @@ void DisplayManager::_drawWeatherRow()
 
     if (weather.errorMsg == "API key invalid")
     {
-      _sprite.setTextColor(CLR_RED, CLR_CARD);
+      _sprite.setTextColor(CLR_RED, CLR_BG);
       _sprite.drawString("Bad API key", 120, top + 12);
-      _sprite.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
       _sprite.setTextSize(1);
       _sprite.drawString("Fix at /config", 120, top + 28);
     }
     else if (weather.errorMsg == "City not found")
     {
-      _sprite.setTextColor(CLR_RED, CLR_CARD);
+      _sprite.setTextColor(CLR_RED, CLR_BG);
       _sprite.drawString("City not found", 120, top + 12);
-      _sprite.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
       _sprite.setTextSize(1);
       _sprite.drawString("Fix at /config", 120, top + 28);
     }
     else if (!weather.errorMsg.isEmpty())
     {
-      _sprite.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
       _sprite.drawString(weather.errorMsg.c_str(), 120, top + WEATHER_ROW_H / 2);
     }
     else
     {
-      _sprite.setTextColor(CLR_SUBTEXT, CLR_CARD);
+      _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
       _sprite.drawString("Weather unavailable", 120, top + WEATHER_ROW_H / 2);
     }
 
@@ -514,7 +492,7 @@ void DisplayManager::_drawWeatherRow()
   auto &cfg = Config::instance();
   const char *unit = cfg.data.metricUnits ? "C" : "F";
 
-  _sprite.setTextColor(CLR_TEXT, CLR_CARD);
+  _sprite.setTextColor(CLR_TEXT, CLR_BG);
   _sprite.setTextSize(2);
   _sprite.setCursor(8, top + 8);
   _sprite.printf("%.0f\xF7%s", weather.temp, unit); // degree symbol = 0xF7 in default font
@@ -665,6 +643,25 @@ int DisplayManager::_fitTextSize(const String &s, int maxSize, int maxWidthPx)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Companion to _fitTextSize(): that function only shrinks text size down to
+// a floor of 1, so a string long enough to overflow maxWidthPx even at size
+// 1 (e.g. a genuinely long clothing recommendation or task name) would still
+// run past the edge of the screen with no further protection. This clips it
+// to however many characters actually fit at the given size, appending ".."
+// when it had to cut anything, so it's visually obvious text is missing
+// rather than looking arbitrarily cut off.
+// ─────────────────────────────────────────────────────────────────────────────
+String DisplayManager::_truncateToFit(const String &s, int size, int maxWidthPx)
+{
+  int maxChars = maxWidthPx / (6 * size);
+  if ((int)s.length() <= maxChars)
+    return s;
+  if (maxChars <= 2)
+    return s.substring(0, std::max(0, maxChars));
+  return s.substring(0, maxChars - 2) + "..";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Current Task Card — dial layout
 // ─────────────────────────────────────────────────────────────────────────────
 void DisplayManager::_drawCurrentTask()
@@ -719,11 +716,13 @@ void DisplayManager::_drawCurrentTask()
     _sprite.drawString(sched.currentGroup()->name.c_str(), 120, top + 4);
   }
 
-  // ── Task name — adaptive size so long names shrink instead of clipping ───
+  // ── Task name — adaptive size so long names shrink instead of clipping,
+  // then truncated as a last resort if it's still too long even at size 1 ──
   _sprite.setTextColor(CLR_TEXT, CLR_BG);
-  _sprite.setTextSize(_fitTextSize(t->name, 2, 228));
+  int taskNameSize = _fitTextSize(t->name, 2, 228);
+  _sprite.setTextSize(taskNameSize);
   _sprite.setTextDatum(TC_DATUM);
-  _sprite.drawString(t->name.c_str(), 120, top + 26);
+  _sprite.drawString(_truncateToFit(t->name, taskNameSize, 228).c_str(), 120, top + 26);
   _sprite.setTextDatum(TL_DATUM);
 
   // ── Time-remaining visual — rocket race, centered in the space between
@@ -829,6 +828,10 @@ void DisplayManager::_drawSleepyAstronaut(int cx, int cy)
   _sprite.fillCircle(cx + 2, cy - 20, 10, visor);
   _sprite.fillCircle(cx - 3, cy - 24, 2, CLR_ACCENT); // small reflection highlight
 
+  // A small companion floating alongside, off to the side so it doesn't
+  // collide with the astronaut's arms
+  _drawAstroCat(cx + 46, cy - 6);
+
   // Lazy "z" drifting up and resetting, only part of the cycle so it
   // doesn't clutter the screen the whole time
   float zPhase = fmodf(_gaugeAnimT, 6.0f);
@@ -840,6 +843,65 @@ void DisplayManager::_drawSleepyAstronaut(int cx, int cy)
     _sprite.setTextDatum(MC_DATUM);
     _sprite.drawString("z", cx + 20, zy);
     _sprite.setTextDatum(TL_DATUM);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Astro-cat -- small floating companion for the sleepy-astronaut scene.
+// Redrawn as an actual sitting-cat silhouette (round furry body + paws +
+// full-size ears + a curled tail) rather than a helmet with a couple of
+// ears peeking over the rim, since that read as "helmet with triangles" more
+// than "cat." Still no drawn face (opaque visor, same trick as the
+// astronaut) -- whiskers do the "unmistakably a cat" work instead, since
+// they're texture rather than a face. Own bob/sway phase so it doesn't move
+// in lockstep with the astronaut next to it.
+// ─────────────────────────────────────────────────────────────────────────────
+void DisplayManager::_drawAstroCat(int cx, int cy)
+{
+  uint32_t suit = CLR_TEXT;
+  uint32_t visor = CLR_STATUSBG;
+  uint32_t fur = CLR_ORANGE;
+
+  // Independent gentle bob -- different phase/speed from the astronaut
+  int bob = (int)(sinf(_gaugeAnimT * 0.35f + 2.2f) * 4.0f);
+  cy += bob;
+
+  // Tail -- curled sweep alongside the body (two joined segments so it
+  // reads as a curl, not a stiff single line), swaying on its own phase.
+  float sway = sinf(_gaugeAnimT * 0.5f + 1.0f);
+  int tx0 = cx + 9, ty0 = cy + 12;
+  int tx1 = tx0 + 7, ty1 = ty0 - 6 + (int)(sway * 3.0f);
+  int tx2 = tx1 + 3, ty2 = ty1 - 10 + (int)(sway * 2.0f);
+  _sprite.drawWideLine(tx0, ty0, tx1, ty1, 3, fur);
+  _sprite.drawWideLine(tx1, ty1, tx2, ty2, 3, fur);
+
+  // Body -- sitting-cat silhouette: rounded body with two small front
+  // paws poking out the bottom, instead of a plain blob standing in for
+  // "torso."
+  _sprite.fillEllipse(cx, cy + 9, 11, 9, fur);
+  _sprite.fillCircle(cx - 6, cy + 15, 3, fur); // left paw
+  _sprite.fillCircle(cx + 6, cy + 15, 3, fur); // right paw
+
+  // Head -- properly cat-sized (was a small peek before), opaque visor
+  // inset for the same no-face trick used on the astronaut.
+  _sprite.fillCircle(cx, cy - 6, 11, suit);
+  _sprite.fillCircle(cx, cy - 6, 8, visor);
+
+  // Ears -- full-size cat ears at the top of the head (was a tiny peek
+  // above a helmet rim), with a shaded inner-ear triangle for a bit of
+  // depth.
+  _sprite.fillTriangle(cx - 9, cy - 12, cx - 5, cy - 21, cx - 1, cy - 11, fur);
+  _sprite.fillTriangle(cx + 1, cy - 11, cx + 5, cy - 21, cx + 9, cy - 12, fur);
+  _sprite.fillTriangle(cx - 7, cy - 13, cx - 5, cy - 18, cx - 3, cy - 13, suit);
+  _sprite.fillTriangle(cx + 3, cy - 13, cx + 5, cy - 18, cx + 7, cy - 13, suit);
+
+  // Whiskers -- three short lines each side, at muzzle height, poking out
+  // past the visor edge. This is what makes the silhouette read as "cat"
+  // rather than "helmet with ears," without drawing an actual face.
+  for (int i = -1; i <= 1; i++)
+  {
+    _sprite.drawLine(cx - 8, cy - 4 + i * 3, cx - 16, cy - 5 + i * 3, fur);
+    _sprite.drawLine(cx + 8, cy - 4 + i * 3, cx + 16, cy - 5 + i * 3, fur);
   }
 }
 
@@ -930,7 +992,18 @@ void DisplayManager::_drawTimeVisual(int cx, int cy, int halfW,
 
 void DisplayManager::setScreen(Screen s)
 {
+  if (_screen == Screen::TIMER_RUNNING && s != Screen::TIMER_RUNNING)
+  {
+    // Leaving the running timer for any reason -- make sure a stale
+    // "still running"/"already done" flag can't linger into whatever
+    // screen comes next, or into the next time a timer gets started.
+    _timerRunning = false;
+    _timerDone = false;
+  }
+  if (s == Screen::TASK_LIST && _screen != Screen::TASK_LIST)
+    _taskListAwaitingRelease = true; // see updateTaskListScroll()
   _screen = s;
+  _forceFullRedraw = true; // next update() repaints every region for the new screen
   if (!_spriteOk)
     return;
   _sprite.fillSprite(CLR_BG);
@@ -985,6 +1058,74 @@ int DisplayManager::pollTouch()
 #include "ClothingAdvisor.h"
 #include <audio/AudioManager.h>
 
+// ─────────────────────────────────────────────────────────────────────────────
+// First-boot / AP setup screen. Shown on the TFT the whole time the device is
+// in Wi-Fi access-point mode (see main.cpp startAP()), so a user with no serial
+// console still knows which network to join and where to point their browser.
+// Drawn once (full frame) when AP mode starts; the main update() loop is
+// skipped while in AP mode so this stays put.
+// ─────────────────────────────────────────────────────────────────────────────
+void DisplayManager::showApSetupScreen(const String &ssid, const String &pass, const String &url)
+{
+  if (!_spriteOk)
+    return;
+
+  _sprite.fillSprite(CLR_BG);
+
+  // Header
+  _sprite.fillRect(0, 0, 240, 30, CLR_STATUSBG);
+  _sprite.setTextDatum(MC_DATUM);
+  _sprite.setTextColor(CLR_TEXT, CLR_STATUSBG);
+  _sprite.setTextSize(2);
+  _sprite.drawString("Wi-Fi Setup", 120, 15);
+
+  // Wi-Fi emblem: four ascending bars (same visual language as the status bar)
+  {
+    const int baseY = 72, x0 = 105, bw = 6, gap = 4;
+    const int hgt[4] = {8, 14, 20, 26};
+    for (int i = 0; i < 4; i++)
+      _sprite.fillRect(x0 + i * (bw + gap), baseY - hgt[i], bw, hgt[i], CLR_ACCENT);
+  }
+
+  // Step 1 — join the network
+  _sprite.setTextSize(1);
+  _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
+  _sprite.drawString("1. Join this Wi-Fi network:", 120, 92);
+
+  _sprite.fillRoundRect(10, 104, 220, 26, 5, CLR_CARD);
+  {
+    int s = _fitTextSize(ssid, 2, 210);
+    _sprite.setTextSize(s);
+    _sprite.setTextColor(CLR_ACCENT, CLR_CARD);
+    _sprite.drawString(_truncateToFit(ssid, s, 210).c_str(), 120, 117);
+  }
+
+  _sprite.setTextSize(1);
+  _sprite.setTextColor(CLR_TEXT, CLR_BG);
+  _sprite.drawString(("Password:  " + pass).c_str(), 120, 146);
+
+  // Step 2 — open the portal
+  _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
+  _sprite.drawString("2. Open this in a browser:", 120, 176);
+
+  _sprite.fillRoundRect(30, 188, 180, 28, 5, CLR_CARD);
+  {
+    int s = _fitTextSize(url, 2, 170);
+    _sprite.setTextSize(s);
+    _sprite.setTextColor(CLR_ACCENT, CLR_CARD);
+    _sprite.drawString(_truncateToFit(url, s, 170).c_str(), 120, 202);
+  }
+
+  // Footer
+  _sprite.setTextSize(1);
+  _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
+  _sprite.drawString("This screen updates once", 120, 250);
+  _sprite.drawString("you're connected.", 120, 264);
+
+  _sprite.setTextDatum(TL_DATUM);
+  _present();
+}
+
 void DisplayManager::showClothingOverlay()
 {
   if (!weather.valid)
@@ -1002,6 +1143,7 @@ void DisplayManager::showClothingOverlay()
   // elapsed-time timeout check in tickOverlay() effectively never fire.
   _overlayDurationMs = UINT32_MAX;
   _overlayStart = millis();
+  _overlayAwaitingRelease = true; // don't let the still-held opening tap dismiss it
 }
 
 // Draws a small popup ON TOP of whatever's already in the sprite (unlike the
@@ -1016,6 +1158,7 @@ void DisplayManager::showIpToast()
   _overlayKind = OverlayKind::IP_TOAST;
   _overlayDurationMs = 3000;
   _overlayStart = millis();
+  _overlayAwaitingRelease = true; // don't let the still-held opening tap dismiss it
 }
 
 // Full-screen rocket-launch celebration, played once per task completion
@@ -1031,6 +1174,7 @@ void DisplayManager::showTaskCompleteAnimation()
   _overlayKind = OverlayKind::TASK_COMPLETE;
   _overlayDurationMs = 4000;
   _overlayStart = millis();
+  _overlayAwaitingRelease = true; // don't let the still-held opening tap dismiss it
 }
 
 // Call this every loop() iteration. Non-blocking: checks for a tap or
@@ -1058,14 +1202,32 @@ void DisplayManager::tickOverlay()
   }
 
   uint16_t tx, ty;
-  bool tapped = _getLogicalTouch(tx, ty);
+  bool touched = _getLogicalTouch(tx, ty);
 
-  if (tapped || timedOut)
+  // The very tap that opened this overlay is usually still physically down for
+  // a few more polls. Ignore touches until the finger has lifted at least once,
+  // otherwise the opening tap would immediately dismiss the overlay (which read
+  // as "it flashes back to the home screen; I have to tap again").
+  if (_overlayAwaitingRelease)
+  {
+    if (!touched)
+      _overlayAwaitingRelease = false;
+    touched = false; // suppress dismissal until that first release is seen
+  }
+
+  if (touched || timedOut)
   {
     _overlayKind = OverlayKind::NONE;
+    _overlayAwaitingRelease = false;
 
     time_t t = time(nullptr);
     std::tm *tm_now = localtime(&t);
+    // The overlay painted over the whole screen, so restoring the screen
+    // underneath must repaint EVERY region -- not just the ones whose data
+    // changed. Without this the compositor's change-detection would skip the
+    // status bar / weather / nav (their data is unchanged) and leave the
+    // overlay's pixels sitting in those regions.
+    _forceFullRedraw = true;
     this->update(tm_now);
   }
 }
@@ -1163,6 +1325,10 @@ void DisplayManager::_drawTaskList()
   _sprite.setTextSize(2);
   _sprite.drawString("All Tasks", 120, 15);
   _sprite.setTextDatum(TL_DATUM);
+  // Back-to-home cue: a "<" chevron at the top-left. The whole header strip
+  // (ty < 30) is the tap target -- the arrow is just the visible hint.
+  _sprite.drawWideLine(12, 15, 20, 8, 3, CLR_TEXT);
+  _sprite.drawWideLine(12, 15, 20, 22, 3, CLR_TEXT);
 
   int y = 30 - _scrollOffset; // scroll shifts content up
   auto &sched = TaskScheduler::instance();
@@ -1181,7 +1347,7 @@ void DisplayManager::_drawTaskList()
       _sprite.setTextColor(CLR_ACCENT, CLR_CARD);
       _sprite.setTextSize(gSize);
       _sprite.setCursor(10, y + (gSize == 2 ? 4 : 8));
-      _sprite.print(grp.name.c_str());
+      _sprite.print(_truncateToFit(grp.name, gSize, 195).c_str());
       _sprite.setTextColor(CLR_TEXT, CLR_CARD);
       _sprite.setTextSize(2);
       _sprite.setCursor(216, y + 4);
@@ -1213,7 +1379,7 @@ void DisplayManager::_drawTaskList()
         _sprite.setTextColor(CLR_TEXT, CLR_BG);
         _sprite.setTextSize(tSize);
         _sprite.setCursor(70, y + (tSize == 2 ? 2 : 6));
-        _sprite.print(task.name.c_str());
+        _sprite.print(_truncateToFit(task.name, tSize, 150).c_str());
       }
       y += 20;
     }
@@ -1223,141 +1389,138 @@ void DisplayManager::_drawTaskList()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Clothing pictograms -- see the header comment above the declaration for
-// why these exist (replacing the 2-letter text codes with actual shapes).
-// Each one is built from the same primitive toolkit used everywhere else in
-// this file (fillRect/fillTriangle/fillCircle/drawLine), roughly 20x20px,
-// centered at (cx, cy). bgColor is the current row's background, used to
-// cut small negative-space details rather than leaving solid blobs.
+// One small clothing pictogram, centered at (cx,cy), sized to fit a
+// `size`x`size` box, for a single ClothingAdvisor code. Primitives-only
+// (rounded rects, triangles, circles, lines) -- same style as the weather
+// icons. Called once per recommended item by _drawClothingOverlay to build
+// the icon+label list (small image on the left, text label to its right).
 // ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawClothingIcon(const String &code, int cx, int cy, uint32_t bgColor)
+void DisplayManager::_drawClothingIcon(const String &code, int cx, int cy, int size)
 {
-  if (code == "CT")
+  const int h = size / 2;            // half-extent
+  const int L = cx - h, R = cx + h;  // box left / right edge
+  const int T = cy - h, B = cy + h;  // box top / bottom edge
+
+  if (code == "TS") // T-shirt / light top
   {
-    // Heavy coat -- wide body + sleeves + a V-neck cut at the collar
-    _sprite.fillRoundRect(cx - 6, cy - 7, 12, 16, 2, CLR_ORANGE);
-    _sprite.fillRect(cx - 10, cy - 5, 4, 10, CLR_ORANGE);
-    _sprite.fillRect(cx + 6, cy - 5, 4, 10, CLR_ORANGE);
-    _sprite.drawLine(cx - 3, cy - 7, cx, cy - 3, bgColor);
-    _sprite.drawLine(cx + 3, cy - 7, cx, cy - 3, bgColor);
+    _sprite.fillRoundRect(cx - h + 4, T + 5, size - 8, size - 8, 3, CLR_PINK);
+    _sprite.fillTriangle(cx - h + 4, T + 5, L, T + 9, cx - h + 4, T + 13, CLR_PINK);
+    _sprite.fillTriangle(cx + h - 4, T + 5, R, T + 9, cx + h - 4, T + 13, CLR_PINK);
+    _sprite.fillTriangle(cx - 4, T + 4, cx + 4, T + 4, cx, T + 9, CLR_BG);
   }
-  else if (code == "JK")
+  else if (code == "JK") // jacket
   {
-    // Jacket -- slimmer/shorter than the coat, plus a center zipper line
-    _sprite.fillRoundRect(cx - 5, cy - 6, 10, 13, 2, CLR_ORANGE);
-    _sprite.fillRect(cx - 8, cy - 4, 3, 8, CLR_ORANGE);
-    _sprite.fillRect(cx + 5, cy - 4, 3, 8, CLR_ORANGE);
-    _sprite.drawFastVLine(cx, cy - 5, 11, bgColor);
+    _sprite.fillRoundRect(cx - h + 4, T + 5, size - 8, size - 6, 3, CLR_ORANGE);
+    _sprite.fillTriangle(cx - h + 4, T + 5, L, T + 9, cx - h + 4, T + 13, CLR_ORANGE);
+    _sprite.fillTriangle(cx + h - 4, T + 5, R, T + 9, cx + h - 4, T + 13, CLR_ORANGE);
+    _sprite.drawFastVLine(cx, T + 7, size - 8, CLR_STATUSBG);
+    _sprite.fillTriangle(cx - 4, T + 4, cx, T + 9, cx, T + 4, CLR_BG);
+    _sprite.fillTriangle(cx + 4, T + 4, cx, T + 9, cx, T + 4, CLR_BG);
   }
-  else if (code == "TS")
+  else if (code == "CT") // coat
   {
-    // T-shirt -- body + two small angled sleeves + a shallow neckline
-    _sprite.fillRect(cx - 6, cy - 3, 12, 12, CLR_PINK);
-    _sprite.fillTriangle(cx - 6, cy - 3, cx - 10, cy + 2, cx - 6, cy + 3, CLR_PINK);
-    _sprite.fillTriangle(cx + 6, cy - 3, cx + 10, cy + 2, cx + 6, cy + 3, CLR_PINK);
-    _sprite.fillCircle(cx, cy - 3, 3, bgColor);
+    _sprite.fillRoundRect(cx - h + 5, T + 4, size - 10, size - 4, 3, CLR_ORANGE);
+    _sprite.fillTriangle(cx - h + 4, T + 5, L, T + 9, cx - h + 4, T + 12, CLR_ORANGE);
+    _sprite.fillTriangle(cx + h - 4, T + 5, R, T + 9, cx + h - 4, T + 12, CLR_ORANGE);
+    _sprite.drawFastVLine(cx, T + 6, size - 8, CLR_STATUSBG);
+    for (int i = 0; i < 3; i++)
+      _sprite.fillCircle(cx, T + 9 + i * 5, 1, CLR_STATUSBG);
   }
-  else if (code == "PT")
+  else if (code == "PT") // trousers
   {
-    // Trousers -- waistband + two legs with a gap between them
-    _sprite.fillRect(cx - 6, cy - 8, 12, 4, CLR_ACCENT);
-    _sprite.fillRect(cx - 6, cy - 4, 5, 12, CLR_ACCENT);
-    _sprite.fillRect(cx + 1, cy - 4, 5, 12, CLR_ACCENT);
+    _sprite.fillRoundRect(cx - 8, T + 4, 16, 4, 1, CLR_ACCENT);
+    _sprite.fillRoundRect(cx - 8, T + 6, 7, size - 8, 1, CLR_ACCENT);
+    _sprite.fillRoundRect(cx + 1, T + 6, 7, size - 8, 1, CLR_ACCENT);
   }
-  else if (code == "SH")
+  else if (code == "SH") // shorts
   {
-    // Shorts -- same as trousers but with short legs
-    _sprite.fillRect(cx - 6, cy - 6, 12, 4, CLR_ACCENT);
-    _sprite.fillRect(cx - 6, cy - 2, 5, 7, CLR_ACCENT);
-    _sprite.fillRect(cx + 1, cy - 2, 5, 7, CLR_ACCENT);
+    _sprite.fillRoundRect(cx - 8, T + 6, 16, 4, 1, CLR_ACCENT);
+    _sprite.fillRoundRect(cx - 8, T + 8, 7, size / 2, 1, CLR_ACCENT);
+    _sprite.fillRoundRect(cx + 1, T + 8, 7, size / 2, 1, CLR_ACCENT);
   }
-  else if (code == "BT")
+  else if (code == "BT") // boots
   {
-    // Boots -- vertical shaft + a wider foot with a heel notch
-    _sprite.fillRect(cx - 3, cy - 8, 6, 10, CLR_SUBTEXT);
-    _sprite.fillRoundRect(cx - 6, cy + 2, 13, 5, 2, CLR_SUBTEXT);
-    _sprite.fillRect(cx - 6, cy + 2, 3, 3, bgColor);
+    _sprite.fillRoundRect(cx - 4, T + 4, 8, size - 10, 2, CLR_SUBTEXT); // shaft
+    _sprite.fillRoundRect(cx - 8, B - 8, 16, 6, 2, CLR_SUBTEXT);        // foot
+    _sprite.fillRect(cx - 8, B - 3, 16, 2, CLR_TEXT);                   // sole
   }
-  else if (code == "SN")
+  else if (code == "SN") // sneaker
   {
-    // Trainers -- low rounded shoe body, sole line, small tongue
-    _sprite.fillRoundRect(cx - 9, cy - 1, 18, 6, 3, CLR_YELLOW);
-    _sprite.fillRect(cx + 3, cy - 5, 5, 5, CLR_YELLOW);
-    _sprite.drawFastHLine(cx - 9, cy + 4, 18, bgColor);
+    _sprite.fillRoundRect(cx - 9, cy, 18, 6, 3, CLR_YELLOW);      // body
+    _sprite.fillRoundRect(cx - 2, cy - 4, 11, 6, 2, CLR_YELLOW);  // toe / ankle
+    _sprite.fillRect(cx - 9, cy + 5, 18, 2, CLR_TEXT);           // sole
   }
-  else if (code == "UM")
+  else if (code == "UM") // umbrella
   {
-    // Umbrella -- dome canopy (circle, bottom half cut away) + handle
-    _sprite.fillCircle(cx, cy - 2, 9, CLR_ACCENT);
-    _sprite.fillRect(cx - 9, cy - 2, 18, 9, bgColor);
-    _sprite.drawFastVLine(cx, cy - 2, 10, CLR_ACCENT);
-    _sprite.drawLine(cx, cy + 8, cx - 3, cy + 8, CLR_ACCENT);
-    _sprite.drawLine(cx - 3, cy + 8, cx - 3, cy + 6, CLR_ACCENT);
+    for (int i = -h + 2; i <= h - 2; i++) // filled half-dome
+    {
+      int hh = (int)roundf(sqrtf((float)((h - 2) * (h - 2) - i * i)));
+      _sprite.drawFastVLine(cx + i, cy - hh, hh, CLR_ACCENT);
+    }
+    _sprite.drawFastVLine(cx, cy, h - 1, CLR_SUBTEXT);   // shaft
+    _sprite.drawFastHLine(cx - 3, B - 2, 4, CLR_SUBTEXT); // handle hook
   }
-  else if (code == "!!")
+  else if (code == "!!") // storm / stay indoors
   {
-    // Storm warning -- bold triangle with a cut-out exclamation mark
-    _sprite.fillTriangle(cx, cy - 9, cx - 9, cy + 8, cx + 9, cy + 8, CLR_RED);
-    _sprite.fillRect(cx - 1, cy - 3, 2, 6, bgColor);
-    _sprite.fillCircle(cx, cy + 6, 1, bgColor);
+    _sprite.fillTriangle(cx, T + 3, L + 2, B - 3, R - 2, B - 3, CLR_RED);
+    _sprite.drawFastVLine(cx, T + 8, size - 16, CLR_TEXT);
+    _sprite.fillCircle(cx, B - 6, 1, CLR_TEXT);
   }
-  else if (code == "SC")
+  else if (code == "SC") // scarf
   {
-    // Scarf -- a wavy band with two hanging tails
-    for (int i = -8; i < 8; i += 4)
-      _sprite.drawLine(cx + i, cy - 2, cx + i + 2, cy + 2, CLR_GREEN);
-    _sprite.fillRect(cx + 6, cy + 2, 3, 8, CLR_GREEN);
+    _sprite.fillRoundRect(cx - h + 3, cy - 5, size - 6, 5, 2, CLR_GREEN);
+    _sprite.fillRoundRect(cx + 2, cy, 5, h, 2, CLR_GREEN);
   }
-  else if (code == "GL")
+  else if (code == "GL") // gloves (mitten)
   {
-    // Gloves/mittens -- rounded body + a thumb notch on the side
-    _sprite.fillRoundRect(cx - 6, cy - 7, 11, 14, 4, CLR_GREEN);
-    _sprite.fillRoundRect(cx - 9, cy - 2, 5, 6, 2, CLR_GREEN);
+    _sprite.fillRoundRect(cx - 5, cy - 4, 10, 12, 4, CLR_GREEN); // palm
+    _sprite.fillRoundRect(cx - 8, cy - 1, 5, 7, 2, CLR_GREEN);   // thumb
+    _sprite.fillRect(cx - 5, cy + 7, 10, 2, CLR_TEXT);          // cuff
   }
-  else if (code == "SG")
+  else if (code == "SG") // sunglasses
   {
-    // Sunglasses -- two lenses + bridge + short arms
-    _sprite.fillRoundRect(cx - 9, cy - 3, 7, 6, 2, CLR_TEXT);
-    _sprite.fillRoundRect(cx + 2, cy - 3, 7, 6, 2, CLR_TEXT);
-    _sprite.drawFastHLine(cx - 2, cy, 4, CLR_TEXT);
-    _sprite.drawLine(cx - 9, cy - 1, cx - 12, cy - 3, CLR_TEXT);
-    _sprite.drawLine(cx + 9, cy - 1, cx + 12, cy - 3, CLR_TEXT);
+    // Lenses in gray, not CLR_STATUSBG -- that near-black was invisible against
+    // the dark overlay background. Dark lens fill with a bright rim reads as
+    // sunglasses while staying visible.
+    _sprite.fillCircle(cx - 5, cy, 4, CLR_STATUSBG);
+    _sprite.fillCircle(cx + 5, cy, 4, CLR_STATUSBG);
+    _sprite.drawCircle(cx - 5, cy, 4, CLR_SUBTEXT);
+    _sprite.drawCircle(cx + 5, cy, 4, CLR_SUBTEXT);
+    _sprite.drawFastHLine(cx - 1, cy - 1, 2, CLR_SUBTEXT);
   }
-  else if (code == "SS")
+  else if (code == "SS") // sunscreen (bottle)
   {
-    // Sunscreen -- small bottle with a cap
-    _sprite.fillRoundRect(cx - 5, cy - 4, 10, 13, 2, CLR_YELLOW);
-    _sprite.fillRect(cx - 3, cy - 8, 6, 4, CLR_YELLOW);
-    _sprite.drawFastHLine(cx - 5, cy + 2, 10, bgColor);
+    _sprite.fillRoundRect(cx - 4, T + 8, 8, size - 10, 2, CLR_YELLOW); // body
+    _sprite.fillRect(cx - 2, T + 4, 4, 4, CLR_SUBTEXT);               // cap
+    _sprite.fillRect(cx - 4, cy, 8, 3, CLR_BG);                       // label band
   }
-  else if (code == "HY")
+  else if (code == "HY") // hydrate (water drop)
   {
-    // Hydration -- a water droplet
-    _sprite.fillTriangle(cx, cy - 9, cx - 6, cy + 2, cx + 6, cy + 2, CLR_ACCENT);
-    _sprite.fillCircle(cx, cy + 2, 6, CLR_ACCENT);
+    _sprite.fillTriangle(cx, T + 3, cx - 5, cy + 1, cx + 5, cy + 1, CLR_ACCENT);
+    _sprite.fillCircle(cx, cy + 3, 5, CLR_ACCENT);
   }
-  else
+  else // unknown code -- neutral chip so the row still shows something
   {
-    // Unmapped code -- small neutral square rather than nothing, so a
-    // future new code doesn't silently disappear
-    _sprite.fillRoundRect(cx - 6, cy - 6, 12, 12, 2, CLR_SUBTEXT);
+    _sprite.fillRoundRect(cx - h + 4, T + 5, size - 8, size - 8, 3, CLR_SUBTEXT);
   }
 }
+
 
 void DisplayManager::_drawClothingOverlay(const std::vector<ClothingItem> &items)
 {
   _sprite.fillRect(0, 0, 240, 320, CLR_BG);
 
-  // ── Header bar ───────────────────────────────────────────────────────────
+  // ── Header bar. Tap-anywhere-to-dismiss (handled in tickOverlay()); the
+  // hint isn't spelled out on screen. ─────────────────────────────────────
   _sprite.fillRect(0, 0, 240, 28, CLR_STATUSBG);
   _sprite.setTextDatum(MC_DATUM);
   _sprite.setTextColor(CLR_TEXT, CLR_STATUSBG);
   _sprite.setTextSize(1);
-  _sprite.drawString("What to Wear", 100, 10);
-
-  _sprite.setTextDatum(TR_DATUM);
-  _sprite.setTextColor(CLR_SUBTEXT, CLR_STATUSBG);
-  _sprite.drawString("tap to close", 234, 10);
+  _sprite.drawString("What to Wear", 120, 14);
+  // Back cue: a "<" chevron at the top-left. The overlay dismisses on a tap
+  // anywhere (see tickOverlay), so this is a visible "tap to go back" hint.
+  _sprite.drawWideLine(11, 14, 19, 7, 3, CLR_TEXT);
+  _sprite.drawWideLine(11, 14, 19, 21, 3, CLR_TEXT);
 
   // ── Conditions summary ───────────────────────────────────────────────────
   auto &cfg = Config::instance();
@@ -1369,50 +1532,44 @@ void DisplayManager::_drawClothingOverlay(const std::vector<ClothingItem> &items
                                 : "\xF7"
                                   "F",
            weather.description.substring(0, 16).c_str());
-  _sprite.setTextDatum(MC_DATUM);
   _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
-  _sprite.setTextSize(1);
-  _sprite.drawString(summary, 120, 40);
-  _sprite.setTextDatum(TL_DATUM);
+  _sprite.drawString(summary, 120, 42);
 
-  // ── Item list ────────────────────────────────────────────────────────────
-  int y = 54;
-  int maxItems = std::min((int)items.size(), 7);
-
-  for (int i = 0; i < maxItems; i++)
+  // ── Icon + label list -- one row per recommended item: a small pictogram
+  // on the left, the recommendation text to its right. Row height (and thus
+  // icon size) adapts to the item count so a full recommendation fits on
+  // screen without scrolling. ─────────────────────────────────────────────
+  int n = (int)items.size();
+  if (n < 1)
   {
-    uint32_t rowBg = (i % 2 == 0) ? CLR_CARD : CLR_BG;
-    _sprite.fillRect(0, y, 240, 30, rowBg);
-    _sprite.fillRect(0, y, 3, 30, CLR_ACCENT); // Left accent bar
-
-    // Icon -- drawn pictogram instead of the raw 2-letter code as text
-    _drawClothingIcon(items[i].icon, 20, y + 15, rowBg);
-
-    // Label
-    _sprite.setTextSize(1);
-    _sprite.setCursor(36, y + 11);
-    _sprite.print(items[i].label.substring(0, 26).c_str());
-
-    y += 32;
-  }
-
-  // Overflow indicator
-  if ((int)items.size() > maxItems)
-  {
-    _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
-    _sprite.setTextDatum(MC_DATUM);
-    _sprite.drawString(
-        ("+" + String(items.size() - maxItems) + " more").c_str(),
-        120, y + 6);
     _sprite.setTextDatum(TL_DATUM);
+    return;
   }
 
-  // ── Dismiss hint ─────────────────────────────────────────────────────────
-  _sprite.fillRect(0, 300, 240, 20, CLR_STATUSBG);
-  _sprite.setTextDatum(MC_DATUM);
-  _sprite.setTextColor(CLR_SUBTEXT, CLR_STATUSBG);
-  _sprite.drawString("Tap anywhere to dismiss", 120, 310);
+  const int listTop = 56, listBottom = 316;
+  int rowH = (listBottom - listTop) / n;
+  if (rowH > 34) rowH = 34;
+  int iconBox = rowH - 8;
+  if (iconBox > 26) iconBox = 26;
+  if (iconBox < 14) iconBox = 14;
+
+  const int iconCx = 24;                  // icon column center
+  const int labelX = 46;                  // text starts here
+  const int maxLabelW = 240 - labelX - 6; // width available for the label
+
+  _sprite.setTextDatum(ML_DATUM); // middle-left: vertically center label on the row
+  for (int i = 0; i < n; i++)
+  {
+    int cy = listTop + rowH * i + rowH / 2;
+    if (cy + iconBox / 2 > 318) break; // clip an unusually long list at the bottom edge
+    _drawClothingIcon(items[i].icon, iconCx, cy, iconBox);
+    int ts = _fitTextSize(items[i].label, 2, maxLabelW);
+    _sprite.setTextSize(ts);
+    _sprite.setTextColor(CLR_TEXT, CLR_BG);
+    _sprite.drawString(_truncateToFit(items[i].label, ts, maxLabelW), labelX, cy);
+  }
   _sprite.setTextDatum(TL_DATUM);
+  _sprite.setTextSize(1);
 }
 
 void DisplayManager::_handleTaskListTap(int ty)
@@ -1426,6 +1583,7 @@ void DisplayManager::_handleTaskListTap(int ty)
     {
       _groupExpanded[gi] = !_groupExpanded[gi];
       _screenDirty = true;
+      _taskList.markDirty(); // list body must repaint (compositor gate)
       return;
     }
     y += 24;
@@ -1444,6 +1602,17 @@ void DisplayManager::updateTaskListScroll()
 
   uint16_t tx, ty;
   bool touched = _getLogicalTouch(tx, ty);
+
+  if (_taskListAwaitingRelease)
+  {
+    // The tap that opened this screen (e.g. the nav bar's "Tasks" button)
+    // may still be physically down for a few more polls. Don't start
+    // tracking a gesture from it -- wait for a genuine release first, then
+    // treat the next touch-down as a real, fresh tap on THIS screen.
+    if (!touched)
+      _taskListAwaitingRelease = false;
+    return;
+  }
 
   if (touched && !_touchDown)
   {
@@ -1469,6 +1638,7 @@ void DisplayManager::updateTaskListScroll()
         int maxScroll = std::max(0, _contentHeight - (320 - 30));
         _scrollOffset = constrain(_scrollOffset + delta, 0, maxScroll);
         _screenDirty = true;
+        _taskList.markDirty(); // list body must repaint (compositor gate)
       }
     }
     _lastTouchY = (int)ty;
@@ -1502,6 +1672,10 @@ void DisplayManager::_drawTimerSet()
   _sprite.setTextDatum(MC_DATUM);
   _sprite.setTextColor(CLR_TEXT, CLR_STATUSBG);
   _sprite.drawString("Set Timer", 120, 15);
+  // Back-to-home cue: a "<" chevron at the top-left. The whole header strip
+  // (ty < 30) is the tap target -- the arrow is just the visible hint.
+  _sprite.drawWideLine(12, 15, 20, 8, 3, CLR_TEXT);
+  _sprite.drawWideLine(12, 15, 20, 22, 3, CLR_TEXT);
 
   const char *labels[6] = {"1 min", "5 min", "10 min", "15 min", "20 min", "30 min"};
   const int cols = 2, btnW = 104, btnH = 56, gapX = 8, gapY = 10;
@@ -1523,11 +1697,15 @@ void DisplayManager::_drawTimerSet()
 
 int DisplayManager::_handleTimerSetTouch(uint16_t tx, uint16_t ty)
 {
+  // Was calling setScreen(HOME) directly here, which bypassed the debounce/
+  // edge-triggering that every other navigation action goes through (see
+  // main.cpp's touch-handling block) -- a single noisy poll reading ty<30
+  // on this panel's marginal touch line could bounce straight back to HOME
+  // with no confirmation at all. Returning zone 3 instead routes it through
+  // the same confirmed-rising-edge path as every other button (main.cpp's
+  // case 3 already does setScreen(HOME) for exactly this "back" zone).
   if (ty < 30)
-  {
-    setScreen(Screen::HOME);
-    return -1;
-  }
+    return 3;
 
   static const uint32_t presetsSec[6] = {60, 300, 600, 900, 1200, 1800};
   const int cols = 2, btnW = 104, btnH = 56, gapX = 8, gapY = 10;
@@ -1606,11 +1784,13 @@ void DisplayManager::_drawTimerRunning()
 
 int DisplayManager::_handleTimerRunningTouch(uint16_t tx, uint16_t ty)
 {
+  // Was mutating timer state and calling setScreen(HOME) directly here --
+  // same undebounced-direct-navigation problem as the TIMER_SET back button
+  // above, and the same fix: return the shared "back" zone so main.cpp's
+  // confirmed-rising-edge path is what actually calls setScreen(HOME). The
+  // timer-state reset now happens in setScreen() itself whenever leaving
+  // TIMER_RUNNING, so it doesn't need to happen here.
   if (ty >= 260 && ty < 300 && tx >= 60 && tx < 180)
-  {
-    _timerRunning = false;
-    _timerDone = false;
-    setScreen(Screen::HOME);
-  }
+    return 3;
   return -1;
 }

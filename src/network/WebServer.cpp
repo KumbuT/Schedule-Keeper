@@ -351,7 +351,10 @@ String AppWebServer::_buildStatusJson()
   strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", now);
   strftime(dateBuf, sizeof(dateBuf), "%A %d %b %Y", now);
 
-  JsonDocument doc;
+  // Reuse the member document (see WebServer.h) rather than allocating a new
+  // one every second -- clear() resets its contents but keeps the grown pool.
+  JsonDocument &doc = _statusDoc;
+  doc.clear();
   doc["type"] = "status";
   doc["time"] = timeBuf;
   doc["date"] = dateBuf;

@@ -7,7 +7,7 @@ public:
 
   void begin(int pin, uint8_t fullBrightness = 255,
              uint32_t dimAfterMs = 60000,
-             uint8_t  dimBrightness = 30);
+             uint8_t  dimBrightness = 0);
 
   void wake();          // Call on any touch event — resets idle timer, full brightness
   void tick();          // Call every loop() — handles fade timing
@@ -20,7 +20,7 @@ private:
 
   int      _pin            = -1;
   uint8_t  _fullBrightness = 255;
-  uint8_t  _dimBrightness  = 30;
+  uint8_t  _dimBrightness  = 0;
   uint32_t _dimAfterMs     = 60000;
   uint32_t _lastActivity   = 0;
   bool     _dimmed         = false;
