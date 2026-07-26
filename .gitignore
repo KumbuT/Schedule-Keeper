@@ -7,3 +7,7 @@ dial_preview.html
 screens.html
 *.zip
 *.txt
+PCB_DESIGN_SPEC.md
+PCB_MANUFACTURING_GUIDE.md
+tools/generate_audio.py
+tools/generate_audio.py
