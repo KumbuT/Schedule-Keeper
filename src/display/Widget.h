@@ -251,10 +251,6 @@ public:
     c.setTextColor(CLR_TEXT, CLR_STATUSBG);
     c.setTextSize(2);
     c.drawString(timeBuf, 120, 2);
-
-    c.setTextColor(CLR_SUBTEXT, CLR_STATUSBG);
-    c.setTextSize(1);
-    c.drawString(_date.c_str(), 120, 19);
     c.setTextDatum(TL_DATUM);
   }
 

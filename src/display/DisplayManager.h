@@ -140,6 +140,7 @@ private:
   DelegateWidget _timerSet;         // full-screen timer presets -> _drawTimerSet()
   DelegateWidget _timerRunScreen;   // full-screen running timer -> _drawTimerRunning()
   NavBarWidget _navBar;             // HOME nav bar, migrated to the widget model
+  char _dateStr[16] = "";               // "Wkd dd Mon" date, shown in the weather row (moved off the top bar)
   bool _overlayAwaitingRelease = false; // ignore the still-held opening tap until the finger lifts
   int _ovDebounce = 0;                  // consecutive-poll counter for debounced overlay dismiss
 

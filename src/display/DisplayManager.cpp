@@ -169,7 +169,14 @@ bool DisplayManager::_getRuntimeTouch(uint16_t &screenX, uint16_t &screenY)
     return false;
   }
 
-  const uint16_t Z_MIN = 110; // loosened from the library default of 350 for this panel's marginal touch signal
+  // Pressure gate. This had been loosened to 110 for corner sensitivity, but
+  // that is low enough that a drifting idle NOISE floor on this marginal panel
+  // can sit ABOVE it and read as a permanent phantom press -- which locks the
+  // UI: the first phantom tap jumps to a screen (e.g. Task List) whose only
+  // exit is a fresh tap that a never-releasing panel can't deliver. Restored
+  // toward the library default so idle noise reads as "released". The very
+  // corners now need a firmer press; re-run the calibration tool if needed.
+  const uint16_t Z_MIN = 350;
 
   uint16_t z1 = _tft.getTouchRawZ();
   if (z1 <= Z_MIN)
@@ -219,6 +226,16 @@ bool DisplayManager::_getRuntimeTouch(uint16_t &screenX, uint16_t &screenY)
 
   screenX = (uint16_t)xx;
   screenY = (uint16_t)yy;
+
+  // Throttled diagnostic so idle noise vs. real-press pressure can be read off
+  // the serial monitor without flooding it. If the UI still misbehaves, these
+  // z-values tell us exactly where to set Z_MIN.
+  static uint32_t lastTouchLog = 0;
+  if (millis() - lastTouchLog > 500)
+  {
+    lastTouchLog = millis();
+    Serial.printf("[Touch] accepted z1=%u z2=%u -> (%u,%u)\n", z1, z2, screenX, screenY);
+  }
 #ifdef TOUCH_DEBUG_LOG
   Serial.printf("[Touch] z1=%u z2=%u raw=(%u,%u) -> screen=(%u,%u)\n", z1, z2, rx, ry, screenX, screenY);
 #endif
@@ -375,10 +392,9 @@ void DisplayManager::update(std::tm *now)
   // hour/min, date string, battery %, wifi bars), so _composite() repaints +
   // pushes the strip only when a displayed value actually changed.
   {
-    char dateBuf[12];
-    strftime(dateBuf, sizeof(dateBuf), "%a %d %b", now);
+    // Date now lives in the weather row (see _drawWeatherRow), not the top bar.
+    strftime(_dateStr, sizeof(_dateStr), "%a %d %b", now);
     _statusBar.setClock(now->tm_hour, now->tm_min);
-    _statusBar.setDate(dateBuf);
     _statusBar.setBattery(BatteryMonitor::instance().percentage());
     _statusBar.setWifi(WiFi.isConnected() ? WiFi.RSSI() : 0);
     _composite(_statusBar, full);
@@ -496,6 +512,14 @@ void DisplayManager::_drawWeatherRow()
   _sprite.setTextSize(2);
   _sprite.setCursor(8, top + 8);
   _sprite.printf("%.0f\xF7%s", weather.temp, unit); // degree symbol = 0xF7 in default font
+
+  // Date (moved here from the top bar) -- centered in the previously empty
+  // middle of the band; temp stays left, icon stays right, nothing else moves.
+  _sprite.setTextDatum(MC_DATUM);
+  _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
+  _sprite.setTextSize(1);
+  _sprite.drawString(_dateStr, 120, top + WEATHER_ROW_H / 2);
+  _sprite.setTextDatum(TL_DATUM);
 
   // Animated condition icon instead of description/humidity/wind text --
   // "images convey the message better than words" per request.
@@ -1625,7 +1649,35 @@ void DisplayManager::updateTaskListScroll()
   }
 
   uint16_t tx, ty;
-  bool touched = _getLogicalTouch(tx, ty);
+  bool raw = _getLogicalTouch(tx, ty);
+
+  // Debounce the raw touch before the gesture layer sees it. This marginal
+  // resistive panel emits single-poll phantom touches; undebounced, each
+  // phantom touch-down+release registered as a tap and was spontaneously
+  // expanding/collapsing groups (notably the bottom one). Require CONFIRM
+  // consecutive identical reads before flipping the confirmed state -- the same
+  // discipline the nav-zone machine in main.cpp already uses. A real tap easily
+  // lasts more than CONFIRM polls; a phantom blip never does.
+  static uint16_t lastTx = 0, lastTy = 0;
+  static int tOn = 0, tOff = 0;
+  static bool confirmed = false;
+  const int CONFIRM = 3;
+  if (raw)
+  {
+    tOff = 0;
+    if (tOn < CONFIRM) tOn++;
+    lastTx = tx; lastTy = ty;
+  }
+  else
+  {
+    tOn = 0;
+    if (tOff < CONFIRM) tOff++;
+  }
+  if (raw && tOn >= CONFIRM) confirmed = true;
+  if (!raw && tOff >= CONFIRM) confirmed = false;
+
+  bool touched = confirmed;
+  ty = lastTy; // use the last confirmed coordinate (stable across a brief dropout)
 
   if (_taskListAwaitingRelease)
   {
@@ -1742,10 +1794,10 @@ int DisplayManager::_handleTimerSetTouch(uint16_t tx, uint16_t ty)
     if (tx >= x && tx < x + btnW && ty >= y && ty < y + btnH)
     {
       startTimer(presetsSec[i]);
-      return -1;
+      return 0;
     }
   }
-  return -1;
+  return 0; // touched, but not on a control -> "neutral" so a tap here still wakes the screen
 }
 
 void DisplayManager::_drawTimerRunning()
@@ -1816,5 +1868,5 @@ int DisplayManager::_handleTimerRunningTouch(uint16_t tx, uint16_t ty)
   // TIMER_RUNNING, so it doesn't need to happen here.
   if (ty >= 260 && ty < 300 && tx >= 60 && tx < 180)
     return 3;
-  return -1;
+  return 0; // touched elsewhere on the timer screen -> neutral, so a tap still wakes it
 }

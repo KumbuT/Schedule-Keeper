@@ -529,6 +529,38 @@ void loop()
 
     int zone = DisplayManager::instance().pollTouch();
 
+    // Zone contract (pollTouch): -1 = panel reports NO touch; 0 = touched but
+    // not on any actionable control (neutral); 1..6 = an actionable control.
+
+    // ── Stuck-touch guard ──────────────────────────────────────────────────
+    // Only an ACTIONABLE control (>=1) held continuously indicates a phantom
+    // pinned to a control -- the one case the neutral-re-arm below still can't
+    // escape. Neutral touches (0) and no-touch (-1) both count as "released"
+    // here, so a finger resting on a blank area never trips this.
+    static uint32_t touchHeldSince = 0;
+    static bool     touchSuspended = false;
+    const uint32_t  STUCK_MS = 6000;
+    uint32_t nowMs = millis();
+
+    if (zone < 1)               // released or neutral
+    {
+      touchHeldSince = 0;
+      touchSuspended = false;   // a real release clears the suspension
+    }
+    else                        // held on an actionable control
+    {
+      if (touchHeldSince == 0)
+        touchHeldSince = nowMs;
+      else if (!touchSuspended && (nowMs - touchHeldSince) > STUCK_MS)
+      {
+        touchSuspended = true;
+        Serial.println("[Touch] stuck press detected -- recovering to HOME, ignoring input until release");
+        DisplayManager::instance().setScreen(Screen::HOME);
+      }
+    }
+    if (touchSuspended)
+      zone = -1;                // treat as released so nothing fires while stuck
+
     if (zone == candidateZone)
     {
       if (candidateCount < CONFIRM_POLLS)
@@ -540,48 +572,56 @@ void loop()
       candidateCount = 1;
     }
 
-    // Commit the candidate to the debounced state only once it's stable, and
-    // fire a rising edge only on a genuine released(-1) -> touching(>=0)
-    // transition (so a finger dragged across zones without lifting won't fire a
-    // new action, and glitches never re-arm it).
-    bool risingEdge = false;
+    // Commit the candidate to the debounced state once it's stable, then derive
+    // two independent debounced edges from the transition:
+    //   * touchDown: released(-1) -> any touch(>=0). Wakes the screen. Fires for
+    //     neutral taps too, so tapping ANYWHERE wakes a dimmed panel (the timer
+    //     "Time's Up" screen was previously only wakeable by hitting the small
+    //     OK button). Debounced, so a single noisy poll can't wake it.
+    //   * navEdge: (released OR neutral) -> actionable control(>=1). Re-arming
+    //     from neutral(0), not just -1, is the deadlock fix: a panel that never
+    //     reports a clean lift can still fire Back and every other control.
     if (candidateCount >= CONFIRM_POLLS && candidateZone != stableZone)
     {
       int prevStable = stableZone;
       stableZone = candidateZone;
-      risingEdge = (prevStable < 0 && stableZone >= 0);
-    }
 
-    if (risingEdge)
-    {
-      BacklightManager::instance().wake();
-      if (!Config::instance().data.muted)
-        AudioManager::instance().beep(1200, 18);
+      bool touchDown = (prevStable < 0 && stableZone >= 0);
+      bool navEdge   = (prevStable < 1 && stableZone >= 1);
 
-      switch (stableZone) // the debounced zone that produced this edge
+      if (touchDown)
+        BacklightManager::instance().wake();
+
+      if (navEdge)
       {
-      case 1:
-        DisplayManager::instance().setScreen(Screen::TASK_LIST);
-        break;
-      case 2:
-      {
-        auto &cfg = Config::instance();
-        cfg.data.muted = !cfg.data.muted;
-        cfg.save();
-        break;
-      }
-      case 3:
-        DisplayManager::instance().setScreen(Screen::HOME);
-        break;
-      case 4:
-        DisplayManager::instance().showClothingOverlay();
-        break;
-      case 5:
-        DisplayManager::instance().setScreen(Screen::TIMER_SET);
-        break;
-      case 6:
-        DisplayManager::instance().showIpToast();
-        break;
+        if (!Config::instance().data.muted)
+          AudioManager::instance().beep(1200, 18);
+
+        switch (stableZone) // the debounced control that produced this edge
+        {
+        case 1:
+          DisplayManager::instance().setScreen(Screen::TASK_LIST);
+          break;
+        case 2:
+        {
+          auto &cfg = Config::instance();
+          cfg.data.muted = !cfg.data.muted;
+          cfg.save();
+          break;
+        }
+        case 3:
+          DisplayManager::instance().setScreen(Screen::HOME);
+          break;
+        case 4:
+          DisplayManager::instance().showClothingOverlay();
+          break;
+        case 5:
+          DisplayManager::instance().setScreen(Screen::TIMER_SET);
+          break;
+        case 6:
+          DisplayManager::instance().showIpToast();
+          break;
+        }
       }
     }
   }

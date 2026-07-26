@@ -44,29 +44,55 @@ void AudioManager::begin() {
 // then reconfigures the I2S clock to match the file's actual sample rate
 // and bit depth. This means you can mix 8kHz and 16kHz clips freely.
 bool AudioManager::_consumeWavHeader() {
-  uint8_t header[44];
-  if (_file.read(header, 44) != 44) return false;
+  // RIFF header: "RIFF" <riffSize> "WAVE"
+  uint8_t riff[12];
+  if (_file.read(riff, 12) != 12) return false;
+  if (riff[0] != 'R' || riff[1] != 'I' || riff[2] != 'F' || riff[3] != 'F') return false;
+  if (riff[8] != 'W' || riff[9] != 'A' || riff[10] != 'V' || riff[11] != 'E') return false;
 
-  // Validate RIFF....WAVE marker
-  if (header[0] != 'R' || header[1] != 'I' ||
-      header[2] != 'F' || header[3] != 'F') return false;
-  if (header[8]  != 'W' || header[9]  != 'A' ||
-      header[10] != 'V' || header[11] != 'E') return false;
+  uint32_t sampleRate    = 16000;
+  uint16_t bitsPerSample = 16;
+  uint16_t channels      = 1;
+  bool     haveFmt       = false;
 
-  // Sample rate: bytes 24–27 little-endian
-  uint32_t sampleRate = header[24] | (header[25] << 8) |
-                        (header[26] << 16) | (header[27] << 24);
+  // Walk the chunk list to locate "fmt " and "data". Do NOT assume "data"
+  // begins at byte 44: many encoders insert extra chunks (LIST/INFO, "fact",
+  // etc.) before it. Assuming 44 plays those header bytes as PCM -- which is
+  // exactly the "done.wav is just crackle while the others are fine" symptom
+  // (that one file was authored with a non-standard header). Finding the real
+  // data offset makes playback robust to any conformant WAV.
+  uint8_t ch[8];
+  while (_file.read(ch, 8) == 8) {
+    uint32_t clen = (uint32_t)ch[4] | ((uint32_t)ch[5] << 8) |
+                    ((uint32_t)ch[6] << 16) | ((uint32_t)ch[7] << 24);
 
-  // Bits per sample: bytes 34–35 little-endian
-  uint16_t bitsPerSample = header[34] | (header[35] << 8);
-
-  Serial.printf("[AudioManager] WAV: %uHz %u-bit\n", sampleRate, bitsPerSample);
-
-  i2s_set_clk(I2S_PORT,
-               sampleRate,
-               (i2s_bits_per_sample_t)bitsPerSample,
-               I2S_CHANNEL_MONO);
-  return true;
+    if (ch[0] == 'f' && ch[1] == 'm' && ch[2] == 't' && ch[3] == ' ') {
+      uint8_t fmt[16];
+      uint32_t want = clen < 16 ? clen : 16;
+      if (_file.read(fmt, want) != (int)want) return false;
+      channels      = (uint16_t)(fmt[2] | (fmt[3] << 8));
+      sampleRate    = (uint32_t)fmt[4] | ((uint32_t)fmt[5] << 8) |
+                      ((uint32_t)fmt[6] << 16) | ((uint32_t)fmt[7] << 24);
+      bitsPerSample = (uint16_t)(fmt[14] | (fmt[15] << 8));
+      haveFmt = true;
+      uint32_t rest = (clen > want ? clen - want : 0) + (clen & 1); // remainder + pad
+      if (rest) _file.seek(_file.position() + rest);
+    }
+    else if (ch[0] == 'd' && ch[1] == 'a' && ch[2] == 't' && ch[3] == 'a') {
+      if (!haveFmt) return false; // data before fmt -> malformed
+      // _file is now positioned exactly at the PCM samples; loop() streams from here.
+      Serial.printf("[AudioManager] WAV: %uHz %u-bit %uch (data @ byte %u)\n",
+                    sampleRate, bitsPerSample, channels, (unsigned)_file.position());
+      i2s_set_clk(I2S_PORT, sampleRate,
+                  (i2s_bits_per_sample_t)bitsPerSample, I2S_CHANNEL_MONO);
+      return true;
+    }
+    else {
+      // Unknown chunk -- skip its (word-aligned) body and keep scanning.
+      _file.seek(_file.position() + clen + (clen & 1));
+    }
+  }
+  return false; // reached EOF without a data chunk
 }
 
 void AudioManager::play(const char* path) {
