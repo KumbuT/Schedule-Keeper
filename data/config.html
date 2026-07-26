@@ -305,7 +305,7 @@ async function loadSchedule() {
     renderGroups();
   } catch(e) {
     document.getElementById('groups-container').innerHTML =
-      '<div style="color:var(--red);font-size:12px;padding:12px;">Could not load schedule</div>';
+      '<div style="color:var(--red);font-size:15px;padding:12px;">Could not load schedule</div>';
   }
 }
 
@@ -331,7 +331,7 @@ function renderGroups() {
   const groups = scheduleData.groups;
   const c = document.getElementById('groups-container');
   if (!groups.length) {
-    c.innerHTML = '<div style="color:var(--sub);font-size:12px;text-align:center;padding:20px;">No groups yet</div>';
+    c.innerHTML = '<div style="color:var(--sub);font-size:15px;text-align:center;padding:20px;">No groups yet</div>';
     return;
   }
   c.innerHTML = groups.map(g => `
@@ -339,7 +339,7 @@ function renderGroups() {
       <div class="group-header">
         <div class="group-color" style="background:${g.color || '#00c8ff'}"></div>
         <div class="group-name">${escapeHtml(g.icon || '')} ${escapeHtml(g.name)}</div>
-        <span style="font-size:10px;color:var(--sub)">${g.tasks?.length || 0} tasks</span>
+        <span style="font-size:13px;color:var(--sub)">${g.tasks?.length || 0} tasks</span>
         <div class="group-actions">
           <button class="icon-btn" title="Rename group" onclick="editGroup('${g.id}')">✎</button>
           <button class="icon-btn danger" title="Delete group" onclick="deleteGroup('${g.id}')">🗑</button>
@@ -366,7 +366,7 @@ function renderTaskRow(g, t) {
           <div>
             <label class="config-label">Name</label>
             <input class="config-input" id="edit-name" value="${escapeHtml(t.name)}" maxlength="${TASK_NAME_MAX}">
-            <div style="font-size:10px;color:var(--sub);margin-top:2px">Kept short so it fits on the device screen (max ${TASK_NAME_MAX} chars)</div>
+            <div style="font-size:13px;color:var(--sub);margin-top:2px">Kept short so it fits on the device screen (max ${TASK_NAME_MAX} chars)</div>
           </div>
           <div>
             <label class="config-label">Start time</label>

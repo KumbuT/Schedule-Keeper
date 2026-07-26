@@ -152,7 +152,7 @@ void AppWebServer::_setupRoutes()
     doc["timezone"] = cfg.data.timezone;
     doc["city"]     = cfg.data.city;
     doc["metric"]   = cfg.data.metricUnits;
-    doc["muted"]    = cfg.data.muted; 
+    doc["muted"]    = cfg.data.muted;
 
     // Expose whether a key exists and its last 6 chars so the UI can show
     // a masked hint (e.g. "…a3f92c") without putting the full key in the page.

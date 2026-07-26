@@ -380,7 +380,7 @@ void setup()
   Config::instance().load();
 
   // Init hardware
-  BatteryMonitor::instance().begin(/*adcPin=*/1);
+  BatteryMonitor::instance().begin(/*adcPin=*/2); // D0/GPIO2 (A0, ADC1) -- battery divider
   DisplayManager::instance().begin();
   AudioManager::instance().begin();
   BacklightManager::instance().begin(/*pin=*/7, /*fullBrightness=*/255,
@@ -508,9 +508,23 @@ void loop()
     // plus the 3-poll same-zone requirement above already do the real job
     // of rejecting noise/phantom touches, so the extra cooldown was both
     // redundant and actively harmful -- removed.
+    // Debounced, noise-robust edge trigger. `stableZone` is the CONFIRMED
+    // debounced state (-1 = released, >=0 = a touch zone). It only changes once
+    // a candidate has been read CONFIRM_POLLS times in a row -- for BOTH press
+    // and release. That is the fix for the "jumpy screen":
+    //
+    //   The previous version reset its confirmed state to -1 on a SINGLE poll
+    //   that didn't match, so ONE glitch from this marginal resistive panel (a
+    //   momentary wrong zone or a dropout while a finger was still held) re-armed
+    //   the rising edge and re-fired the action -- the screen jumped as if
+    //   tapped repeatedly. Now a noise burst shorter than CONFIRM_POLLS is
+    //   absorbed: stableZone doesn't move until a read is genuinely stable, so a
+    //   held touch fires exactly once and only a real (debounced) release
+    //   re-arms the next tap. Bumping CONFIRM_POLLS to 4-5 rejects even longer
+    //   glitches at the cost of a few ms of latency.
     static int candidateZone = -1;
     static int candidateCount = 0;
-    static int lastConfirmedZone = -1; // -1 = not touching, after debounce
+    static int stableZone = -1; // debounced state that gates the edge trigger
     const int CONFIRM_POLLS = 3;
 
     int zone = DisplayManager::instance().pollTouch();
@@ -526,9 +540,17 @@ void loop()
       candidateCount = 1;
     }
 
-    bool confirmedTouching = (candidateZone >= 0 && candidateCount >= CONFIRM_POLLS);
-    bool risingEdge = confirmedTouching && (lastConfirmedZone < 0);
-    lastConfirmedZone = confirmedTouching ? candidateZone : -1;
+    // Commit the candidate to the debounced state only once it's stable, and
+    // fire a rising edge only on a genuine released(-1) -> touching(>=0)
+    // transition (so a finger dragged across zones without lifting won't fire a
+    // new action, and glitches never re-arm it).
+    bool risingEdge = false;
+    if (candidateCount >= CONFIRM_POLLS && candidateZone != stableZone)
+    {
+      int prevStable = stableZone;
+      stableZone = candidateZone;
+      risingEdge = (prevStable < 0 && stableZone >= 0);
+    }
 
     if (risingEdge)
     {
@@ -536,7 +558,7 @@ void loop()
       if (!Config::instance().data.muted)
         AudioManager::instance().beep(1200, 18);
 
-      switch (zone)
+      switch (stableZone) // the debounced zone that produced this edge
       {
       case 1:
         DisplayManager::instance().setScreen(Screen::TASK_LIST);

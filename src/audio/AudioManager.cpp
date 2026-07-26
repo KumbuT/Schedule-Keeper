@@ -13,8 +13,8 @@ void AudioManager::_installDriver() {
     .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count        = 4,
-    .dma_buf_len          = 256,
+    .dma_buf_count        = 8,   // more buffered audio (~128 ms @16 kHz) so a
+    .dma_buf_len          = 256, // slow render frame can't drain it to underrun
     .use_apll             = false,
     .tx_desc_auto_clear   = true,
   };
@@ -94,21 +94,36 @@ void AudioManager::stop() {
   i2s_zero_dma_buffer(I2S_PORT);
 }
 
-// Called every loop() — streams the next CHUNK of PCM data into the I2S
-// DMA buffer. Non-blocking: i2s_write returns immediately if buffer is full.
+// Called every loop() — tops up the I2S DMA buffer, feeding as many chunks as
+// fit (non-blocking) rather than a single chunk per call. This decouples
+// playback from the main-loop rate: previously one chunk was written per
+// iteration, so when the loop slowed down (notably the task-complete
+// celebration animation redrawing the whole screen at ~20 fps) the DMA
+// underran and the audio broke up into gaps -- which truncated done.wav to
+// only its clean tail ("...well done"). Now each call refills the buffer, so a
+// slow render can't starve playback. Capped per call so a long clip can't hog
+// the loop.
 void AudioManager::loop() {
   if (!_playing || !_file) return;
 
-  uint8_t buf[CHUNK];
-  size_t  bytesRead = _file.read(buf, CHUNK);
+  for (int i = 0; i < 16; i++) {
+    uint8_t buf[CHUNK];
+    size_t bytesRead = _file.read(buf, CHUNK);
+    if (bytesRead == 0) {
+      stop();  // EOF
+      return;
+    }
 
-  if (bytesRead == 0) {
-    stop();  // EOF
-    return;
+    size_t bytesWritten = 0;
+    i2s_write(I2S_PORT, buf, bytesRead, &bytesWritten, 0);  // non-blocking
+
+    if (bytesWritten < bytesRead) {
+      // DMA is full -- rewind the unwritten remainder so we resume exactly
+      // there on the next call (no dropped samples).
+      _file.seek(_file.position() - (bytesRead - bytesWritten));
+      return;
+    }
   }
-
-  size_t bytesWritten = 0;
-  i2s_write(I2S_PORT, buf, bytesRead, &bytesWritten, portMAX_DELAY);
 }
 
 // ── Touch beep ────────────────────────────────────────────────────────────────

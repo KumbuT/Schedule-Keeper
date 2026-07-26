@@ -1204,21 +1204,45 @@ void DisplayManager::tickOverlay()
   uint16_t tx, ty;
   bool touched = _getLogicalTouch(tx, ty);
 
-  // The very tap that opened this overlay is usually still physically down for
-  // a few more polls. Ignore touches until the finger has lifted at least once,
-  // otherwise the opening tap would immediately dismiss the overlay (which read
-  // as "it flashes back to the home screen; I have to tap again").
+  // Debounced tap-to-dismiss, robust to this resistive panel's bounce/dropout.
+  // Two phases, each needing OV_CONFIRM consecutive *stable* reads:
+  //   1) AWAIT-RELEASE: the finger that opened the overlay -- and any bounce as
+  //      it lifts -- must read as lifted for OV_CONFIRM polls before a dismiss
+  //      can arm. One stray touch during a hold no longer counts as a lift.
+  //   2) ARMED: a genuine NEW tap must read touched for OV_CONFIRM polls to
+  //      dismiss.
+  // This fixes "the overlay only shows while pressed and vanishes on release":
+  // the old check dismissed on a single touch read after the first no-touch, so
+  // the release bounce (touch->no-touch->touch) satisfied it. A held touch is
+  // steady (no bounce) so it stayed up -- exactly the reported behaviour.
+  const int OV_CONFIRM = 3;
+  bool dismissByTap = false;
   if (_overlayAwaitingRelease)
   {
     if (!touched)
-      _overlayAwaitingRelease = false;
-    touched = false; // suppress dismissal until that first release is seen
+    {
+      if (++_ovDebounce >= OV_CONFIRM)
+      {
+        _overlayAwaitingRelease = false;
+        _ovDebounce = 0;
+      }
+    }
+    else
+      _ovDebounce = 0;
   }
+  else if (touched)
+  {
+    if (++_ovDebounce >= OV_CONFIRM)
+      dismissByTap = true;
+  }
+  else
+    _ovDebounce = 0;
 
-  if (touched || timedOut)
+  if (dismissByTap || timedOut)
   {
     _overlayKind = OverlayKind::NONE;
     _overlayAwaitingRelease = false;
+    _ovDebounce = 0;
 
     time_t t = time(nullptr);
     std::tm *tm_now = localtime(&t);

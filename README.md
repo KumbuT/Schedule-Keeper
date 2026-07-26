@@ -62,7 +62,7 @@ itself — is configured from a browser; nothing is hard-coded.
 | **XPT2046 touch controller** | Resistive touch, shares the display's SPI bus |
 | **MAX98357A I2S amplifier** | Mono class-D amp for the voice prompts |
 | **Speaker, 4–8 Ω** | Driven by the MAX98357A |
-| **LiPo battery + resistor divider** | 2×100 kΩ divider (ratio 0.5) into an ADC pin |
+| **LiPo battery + resistor divider** | 2×200 kΩ divider (ratio 0.5) into an ADC pin |
 
 The display and touch panel share one SPI bus (separate chip-select lines). The
 backlight is on a dedicated GPIO (PWM-dimmable). Audio uses the ESP32's
@@ -85,33 +85,72 @@ controller (separate chip-selects). SPI runs at 10 MHz (display) / 1 MHz
 | TFT MISO (SDO) | GPIO9 | D9 |
 | TFT CS | GPIO3 | D1 |
 | TFT DC | GPIO4 | D2 |
-| TFT RST | GPIO5 | D3 |
+| TFT RST | (no GPIO) | tied to 3.3 V via 10 kΩ; SPI software reset (`TFT_RST=-1`) |
 | Touch CS (T_CS) | GPIO6 | D4 |
 | Touch data out (T_DO) → MISO | GPIO9 | D9 (via 10 kΩ, shared MISO) |
 | Backlight (PWM) | GPIO7 | D5 |
 | I2S BCLK | GPIO20 | D7 (RX) |
 | I2S LRCLK (WS) | GPIO21 | D6 (TX) |
-| I2S DOUT → amp DIN | GPIO2 | D0 (A0) |
+| I2S DIN (amp data) | GPIO5 | D3 |
 | Battery charge sense (ADC) | GPIO2 | D0 (A0) |
 
-Note that **D0 (GPIO2) appears twice** — audio DIN and the battery sense
-divider are currently on the same pin. See the conflict note under
-[Battery & charging](#battery--charging).
+Freeing the TFT RST pin (tie to 3.3 V + SPI software reset) opened up GPIO5 for
+the I2S audio data line, so battery sense (D0/GPIO2, a reliable ADC1 input) and
+audio no longer share a pin.
+
+The touch controller shares the display's SPI clock and data-in lines:
+**T_CLK → GPIO8** (with SCLK) and **T_DIN → GPIO10** (with MOSI). Its interrupt
+line **T_IRQ is left unconnected** — the firmware polls touch.
+
+### Display module — 14-pin header
+
+The common 2.8" ILI9341 + XPT2046 "red board" ordering (verify against your
+exact module — some reorder LED/RESET or use a 5 V VCC):
+
+| Pin | Module label | Wired to |
+|---|---|---|
+| 1 | VCC | 3.3 V |
+| 2 | GND | GND |
+| 3 | CS | GPIO3 / D1 |
+| 4 | RESET | 3.3 V via 10 kΩ (software reset) |
+| 5 | DC / RS | GPIO4 / D2 |
+| 6 | SDI (MOSI) | GPIO10 / D10 |
+| 7 | SCK | GPIO8 / D8 |
+| 8 | LED (backlight) | GPIO7 / D5 |
+| 9 | SDO (MISO) | GPIO9 / D9 |
+| 10 | T_CLK | GPIO8 / D8 (shared SCK) |
+| 11 | T_CS | GPIO6 / D4 |
+| 12 | T_DIN | GPIO10 / D10 (shared MOSI) |
+| 13 | T_DO | GPIO9 / D9 via 10 kΩ (shared MISO) |
+| 14 | T_IRQ | not connected |
+
+### Power & battery connector
+
+- **3.3 V** (XIAO `3V3` pad) feeds: display VCC, MAX98357A `VIN` (see the Audio
+  table for the 3.3 V vs 5 V trade-off), the RST 10 kΩ pull-up, the battery
+  divider top, and the 1000 µF bulk cap (+).
+- **GND** is common to the XIAO, display, amp, speaker return, divider bottom,
+  and cap (−).
+- **Battery:** a single-cell LiPo on a **JST-PH 2-pin** connector goes to the
+  XIAO's underside **BAT+ / BAT−** pads (the XIAO's on-module charger charges it
+  over USB). `+BATT` also feeds the sense divider → D0.
+- **Speaker:** the MAX98357A `OUT+ / OUT−` drive a **4–8 Ω** speaker (a 2-pin
+  JST-PH on the carrier PCB).
 
 ### External passive components
 
 | Component | Placement | Purpose |
 |---|---|---|
 | 10 kΩ resistor | In series between XIAO MISO (GPIO9 / D9) and the panel's **T_DO** | Isolates the XPT2046's data-out on the shared SPI MISO line |
-| 10 kΩ resistor | On the TFT **RST** line (GPIO5 / D3) | Reset pull-up (also the hook for later freeing GPIO5 via `TFT_RST=-1`) |
-| 2 × 100 kΩ resistors | `VBAT → 100 kΩ → [sense node] → 100 kΩ → GND`; sense node → **D0** | Battery voltage divider (ratio 0.5) for state-of-charge |
+| 10 kΩ resistor | TFT **RST** → 3.3 V | Holds RST high; firmware uses the SPI software reset (`TFT_RST=-1`), which frees GPIO5 for the I2S data line |
+| 2 × 200 kΩ resistors | `VBAT → 200 kΩ → [sense node] → 200 kΩ → GND`; sense node → **D0** | Battery voltage divider (ratio 0.5) for state-of-charge (200 kΩ over 100 kΩ halves idle drain) |
 | 1000 µF capacitor | Across XIAO **3V3 ↔ GND** | Bulk supply reservoir (steadies the 3V3 rail against display/audio current spikes) |
 
 ### Audio — MAX98357A I2S amplifier
 
 | MAX98357A pin | Connects to | Notes |
 |---|---|---|
-| DIN | XIAO GPIO2 / D0 | I2S data |
+| DIN | XIAO GPIO5 / D3 | I2S data |
 | BCLK | XIAO GPIO20 / D7 | Bit clock |
 | LRC | XIAO GPIO21 / D6 | Word / LR clock |
 | VIN | 5V (or 3V3) | Louder at 5 V |
@@ -126,19 +165,19 @@ held high and `GAIN` can be left floating.
 ### Battery & charging
 
 A single-cell LiPo powers the device through the XIAO's onboard battery pads
-(charged over USB). State-of-charge is measured by the 100 kΩ / 100 kΩ divider
-above, feeding the sense node into **D0 (GPIO2)**; the firmware maps
-3.00 V → 0 % and 4.20 V → 100 % (ADC at 11 dB attenuation, 0–3.1 V range,
-16-sample averaging).
+(charged over USB). The XIAO ESP32-C3 **charges** the cell but its battery pad
+is **not connected to any ADC**, so there is no built-in way to read the
+voltage — an external divider is required. State-of-charge is measured by the
+200 kΩ / 200 kΩ divider above, feeding the sense node into **D0 (GPIO2)**; the
+firmware reads it with `analogReadMilliVolts()` (factory-calibrated ADC) and
+maps 3.00 V → 0 % and 4.20 V → 100 % (11 dB attenuation, 16-sample averaging).
 
-> **Known pin conflict (pending final wire-up, left as-is for bench testing):**
-> the battery sense divider and the I2S audio DIN are **both on D0 (GPIO2)** —
-> they cannot share the pin — and the firmware currently reads the battery on
-> **GPIO1**, not D0, so the on-screen battery percentage is not yet
-> trustworthy. Planned fix at final assembly: the TFT RST 10 kΩ lets us tie RST
-> to 3V3 and set `TFT_RST=-1` to free **GPIO5**; move I2S DOUT to GPIO5, and set
-> the battery ADC pin to GPIO2 (D0 / A0, a reliable ADC1 input). Audio and
-> battery then stop colliding and the firmware reads the correct pin.
+The earlier D0 pin conflict is resolved on this board revision: TFT RST is tied
+to 3.3 V (SPI software reset, `TFT_RST=-1`), which freed GPIO5 for the I2S audio
+data line, so audio (GPIO5) and battery sense (D0/GPIO2) no longer collide. The
+firmware reads the battery on D0/GPIO2 (`BatteryMonitor::begin(2)`) to match.
+The `touch_calibration_tool` project uses the same `TFT_RST=-1`, so calibrate
+and flash in that order without erasing flash.
 
 ---
 
@@ -274,7 +313,10 @@ Serial monitor: `pio device monitor` (115200 baud).
 ## First-time setup (WiFi & config)
 
 1. On first boot (no saved WiFi), the device starts a WiFi access point and
-   shows setup instructions on screen.
+   shows a **Wi-Fi Setup screen** on the TFT with the network name
+   (`ScheduleTracker-Setup`), password (`setup1234`), and the portal address
+   (`192.168.4.1`). The backlight stays on and touch navigation is disabled
+   while in this mode.
 2. Join that AP from a phone/laptop; the captive portal (`setup.html`) opens.
    Select your network and enter the password.
 3. The device reboots onto your network. Tap the on-screen WiFi icon to see its
@@ -314,29 +356,36 @@ Four WAV files live in `data/audio/` and are played during tasks:
 
 | File | Spoken |
 |---|---|
-| `starting.wav` | "Starting your task now." |
-| `halfway.wav` | "You are halfway through." |
-| `onemin.wav` | "One minute remaining." |
-| `done.wav` | "Task complete. Well done." |
+| `starting.wav` | "Let's get started! You can do it." |
+| `halfway.wav` | "You're halfway there. Keep it up!" |
+| `onemin.wav` | "Almost done! Just one more minute." |
+| `done.wav` | "All done! Great job!" |
 
-Format required by `AudioManager`: **mono, 16-bit PCM WAV** (8 kHz recommended;
-the header's real sample rate is honored). The 44-byte header must be
-standard — no metadata chunks before the audio data.
+Format required by `AudioManager`: **mono, 16-bit PCM WAV** (16 kHz default —
+8 kHz sounds crackly; the header's real sample rate is honored). The 44-byte
+header must be standard — no metadata chunks before the audio data.
 
 Regenerate them with `tools/generate_audio.py`:
 
 ```bash
-# Offline, cross-platform (installs a bundled espeak-ng via pip):
-python3 tools/generate_audio.py --engine espeak
+# Best quality — free neural voices, no API key (needs internet). A warm
+# child voice, ideal for this device:
+pip install edge-tts
+python3 tools/generate_audio.py --engine edge --voice en-US-AnaNeural
 
-# Best quality on macOS (built-in neural voices):
+# AWS Polly neural (needs an AWS account; uses your own credentials via
+# `aws configure`). "Ivy" is a US-English child voice:
+pip install boto3
+python3 tools/generate_audio.py --engine polly --voice Ivy
+
+# Natural, fully offline on macOS (built-in / downloaded "Enhanced" voices):
 python3 tools/generate_audio.py --engine say --voice "Samantha"
 
-# Neural, with a downloaded Piper model:
-python3 tools/generate_audio.py --engine piper --piper-model voice.onnx
+# Offline everywhere, no internet — softened espeak (synthetic, last resort):
+python3 tools/generate_audio.py --engine espeak --soft
 ```
 
-Requires `ffmpeg` on PATH for the final 8 kHz / mono / 16-bit conversion. Tasks
+Requires `ffmpeg` on PATH for the final mono / 16-bit / 16 kHz conversion. Tasks
 may override `starting`/`halfway`/`done` per-task via the schedule.
 
 ---

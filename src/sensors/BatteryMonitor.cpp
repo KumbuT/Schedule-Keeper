@@ -14,16 +14,19 @@ void BatteryMonitor::begin(int adcPin) {
 }
 
 float BatteryMonitor::_readVoltage() {
-  // Average 16 samples to reduce ADC noise
-  long sum = 0;
+  // Average 16 calibrated-millivolt samples. analogReadMilliVolts() applies the
+  // ESP32-C3's per-chip factory ADC calibration (stored in eFuse), so it is far
+  // more accurate than scaling a raw analogRead() by a fixed full-scale value --
+  // that full scale varies ~10% chip-to-chip. Result lands within a few mV of a
+  // multimeter.
+  long sumMv = 0;
   for (int i = 0; i < 16; i++) {
-    sum += analogRead(_adcPin);
+    sumMv += analogReadMilliVolts(_adcPin);
     delayMicroseconds(100);
   }
-  float adcAvg  = sum / 16.0f;
-  float adcMv   = (adcAvg / ADC_RESOLUTION) * ADC_MAX_MV;
-  float batMv   = adcMv / DIVIDER_RATIO;
-  return batMv / 1000.0f;  // Return in Volts
+  float adcMv = sumMv / 16.0f;         // calibrated pin voltage, mV
+  float batMv = adcMv / DIVIDER_RATIO; // undo the 0.5 divider
+  return batMv / 1000.0f;              // volts
 }
 
 void BatteryMonitor::update() {

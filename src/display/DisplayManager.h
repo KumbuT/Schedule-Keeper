@@ -141,6 +141,7 @@ private:
   DelegateWidget _timerRunScreen;   // full-screen running timer -> _drawTimerRunning()
   NavBarWidget _navBar;             // HOME nav bar, migrated to the widget model
   bool _overlayAwaitingRelease = false; // ignore the still-held opening tap until the finger lifts
+  int _ovDebounce = 0;                  // consecutive-poll counter for debounced overlay dismiss
 
   void _present();                                        // push the finished sprite frame to the real panel
 

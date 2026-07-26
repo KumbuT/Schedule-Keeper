@@ -15,11 +15,12 @@ private:
   int   _pct     = 0;
   float _voltage = 0.0f;
 
-  // Voltage divider: 100kΩ + 100kΩ, ratio = 0.5
-  // ESP32-C3 ADC reference = 2500mV (attenuation DB_11 for 0–3.1V range)
-  static constexpr float DIVIDER_RATIO  = 0.5f;
-  static constexpr float ADC_MAX_MV     = 2500.0f;
-  static constexpr int   ADC_RESOLUTION = 4095;
+  // External voltage divider on the ADC pin: 200kΩ + 200kΩ, ratio = 0.5.
+  // The XIAO ESP32-C3's battery pad is NOT wired to any ADC, so this external
+  // divider is required to sense the cell (see README). Voltage is read via
+  // analogReadMilliVolts() (factory-calibrated), so no fixed full-scale
+  // constant is needed; attenuation is set to 11 dB (0–3.1 V) in begin().
+  static constexpr float DIVIDER_RATIO = 0.5f;
 
   // LiPo voltage thresholds
   static constexpr float VBAT_FULL  = 4.20f;

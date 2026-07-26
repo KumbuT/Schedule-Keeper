@@ -24,7 +24,7 @@ private:
   static constexpr i2s_port_t I2S_PORT  = I2S_NUM_0;
   static constexpr int         PIN_BCLK  = 20;
   static constexpr int         PIN_LRCLK = 21;
-  static constexpr int         PIN_DOUT  = 2;
+  static constexpr int         PIN_DOUT  = 5;  // GPIO5/D3 (moved off GPIO2/D0, now battery sense)
   static constexpr size_t      CHUNK     = 512;  // bytes per DMA write
 
   File   _file;
