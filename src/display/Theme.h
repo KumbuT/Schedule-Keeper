@@ -12,7 +12,7 @@
 // clash).
 // ─────────────────────────────────────────────────────────────────────────────
 constexpr uint32_t CLR_BG = 0x1082;
-constexpr uint32_t CLR_CARD = 0x2965;     // slightly saturated card fill
+constexpr uint32_t CLR_CARD = 0x21AA;     // cool slate-blue card fill (used everywhere)
 constexpr uint32_t CLR_ACCENT = 0x07FF;   // cyan
 constexpr uint32_t CLR_TEXT = 0xFFFF;
 constexpr uint32_t CLR_SUBTEXT = 0xAD75;  // gray
@@ -23,4 +23,4 @@ constexpr uint32_t CLR_ORANGE = 0xFDA0;
 constexpr uint32_t CLR_PINK = 0xFE19;
 constexpr uint32_t CLR_BAR_BG = 0x39C7;
 constexpr uint32_t CLR_STATUSBG = 0x0841;
-constexpr uint32_t CLR_CLOUD = 0xC618;    // weather-icon cloud body
+constexpr uint32_t CLR_CLOUD = 0xEF7D;    // weather-icon cloud body (brightened near-white)

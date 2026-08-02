@@ -227,15 +227,6 @@ bool DisplayManager::_getRuntimeTouch(uint16_t &screenX, uint16_t &screenY)
   screenX = (uint16_t)xx;
   screenY = (uint16_t)yy;
 
-  // Throttled diagnostic so idle noise vs. real-press pressure can be read off
-  // the serial monitor without flooding it. If the UI still misbehaves, these
-  // z-values tell us exactly where to set Z_MIN.
-  static uint32_t lastTouchLog = 0;
-  if (millis() - lastTouchLog > 500)
-  {
-    lastTouchLog = millis();
-    Serial.printf("[Touch] accepted z1=%u z2=%u -> (%u,%u)\n", z1, z2, screenX, screenY);
-  }
 #ifdef TOUCH_DEBUG_LOG
   Serial.printf("[Touch] z1=%u z2=%u raw=(%u,%u) -> screen=(%u,%u)\n", z1, z2, rx, ry, screenX, screenY);
 #endif
@@ -392,9 +383,13 @@ void DisplayManager::update(std::tm *now)
   // hour/min, date string, battery %, wifi bars), so _composite() repaints +
   // pushes the strip only when a displayed value actually changed.
   {
-    // Date now lives in the weather row (see _drawWeatherRow), not the top bar.
+    // Date lives in the weather row now; the top bar shows the clock plus the
+    // timezone abbreviation (PST/PDT/UTC...), resolved from the active TZ via %Z.
     strftime(_dateStr, sizeof(_dateStr), "%a %d %b", now);
+    char tzBuf[8];
+    strftime(tzBuf, sizeof(tzBuf), "%Z", now);
     _statusBar.setClock(now->tm_hour, now->tm_min);
+    _statusBar.setTz(tzBuf);
     _statusBar.setBattery(BatteryMonitor::instance().percentage());
     _statusBar.setWifi(WiFi.isConnected() ? WiFi.RSSI() : 0);
     _composite(_statusBar, full);
@@ -410,12 +405,16 @@ void DisplayManager::update(std::tm *now)
     // 3a. Current-task card -- animated delegating widget (draw code stays in
     //     _drawCurrentTask). alwaysRepaint => composited (repainted + pushed)
     //     every tick; only its own region is pushed, not the whole frame.
-    _composite(_currentTask, full);
+    //     Skipped while the completion celebration owns the card region
+    //     (tickCelebration() drives it at ~18 fps), so the two don't fight.
+    if (!_celebrating)
+      _composite(_currentTask, full);
 
     // 3b. Nav bar -- migrated to the widget model. setMuted() marks it dirty
     // only on a real change; _composite() draws it + pushes its bounds when
     // dirty (or unconditionally on a full refresh).
     _navBar.setMuted(Config::instance().data.muted);
+    _navBar.setTimerEnabled(TaskScheduler::instance().currentTask() == nullptr);
     _composite(_navBar, full);
   }
 }
@@ -508,22 +507,36 @@ void DisplayManager::_drawWeatherRow()
   auto &cfg = Config::instance();
   const char *unit = cfg.data.metricUnits ? "C" : "F";
 
-  _sprite.setTextColor(CLR_TEXT, CLR_BG);
+  const int midY = top + WEATHER_ROW_H / 2;
+
+  // Temperature (left, color-coded by value) and date (center, cyan). Same
+  // font/size (2); both vertically centered so their baselines line up.
+  // Thresholds are in °C so they hold regardless of the displayed unit.
+  float tempC = cfg.data.metricUnits ? weather.temp
+                                     : (weather.temp - 32.0f) * 5.0f / 9.0f;
+  uint32_t tColor;
+  if      (tempC < 5)   tColor = 0x041F;      // cold  -> blue
+  else if (tempC < 15)  tColor = CLR_ACCENT;  // cool  -> cyan
+  else if (tempC < 24)  tColor = CLR_GREEN;   // mild  -> green
+  else if (tempC < 30)  tColor = CLR_ORANGE;  // warm  -> orange
+  else                  tColor = CLR_RED;     // hot   -> red
+
+  char tbuf[12];
+  snprintf(tbuf, sizeof(tbuf), "%.0f\xF7%s", weather.temp, unit); // 0xF7 = degree glyph
   _sprite.setTextSize(2);
-  _sprite.setCursor(8, top + 8);
-  _sprite.printf("%.0f\xF7%s", weather.temp, unit); // degree symbol = 0xF7 in default font
+  _sprite.setTextColor(tColor, CLR_BG);
+  _sprite.setTextDatum(ML_DATUM);
+  _sprite.drawString(tbuf, 6, midY);
 
-  // Date (moved here from the top bar) -- centered in the previously empty
-  // middle of the band; temp stays left, icon stays right, nothing else moves.
+  _sprite.setTextColor(CLR_ACCENT, CLR_BG); // date in cyan accent
   _sprite.setTextDatum(MC_DATUM);
-  _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
-  _sprite.setTextSize(1);
-  _sprite.drawString(_dateStr, 120, top + WEATHER_ROW_H / 2);
-  _sprite.setTextDatum(TL_DATUM);
+  _sprite.drawString(_dateStr, 128, midY);
 
-  // Animated condition icon instead of description/humidity/wind text --
-  // "images convey the message better than words" per request.
-  _drawWeatherIcon(175, top + WEATHER_ROW_H / 2);
+  // Animated condition icon (right).
+  _drawWeatherIcon(220, midY);
+
+  _sprite.setTextDatum(TL_DATUM);
+  _sprite.setTextSize(1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -626,7 +639,7 @@ void DisplayManager::_drawWeatherIcon(int cx, int cy)
     for (int i = 0; i < 3; i++)
     {
       int drift = (int)(fmodf(_gaugeAnimT * 5.0f + i * 40.0f, 16.0f)) - 8;
-      _sprite.drawFastHLine(cx - 11 + drift, cy - 5 + i * 5, 22, CLR_SUBTEXT);
+      _sprite.drawFastHLine(cx - 11 + drift, cy - 5 + i * 5, 22, CLR_CLOUD);
     }
   }
   else
@@ -688,6 +701,83 @@ String DisplayManager::_truncateToFit(const String &s, int size, int maxWidthPx)
 // ─────────────────────────────────────────────────────────────────────────────
 // Current Task Card — dial layout
 // ─────────────────────────────────────────────────────────────────────────────
+// A small 5-point star. filled = solid (earned); otherwise just the outline.
+void DisplayManager::_drawStar(int cx, int cy, int r, bool filled, uint32_t color)
+{
+  float px[10], py[10];
+  for (int i = 0; i < 10; i++)
+  {
+    float rr = (i % 2 == 0) ? (float)r : r * 0.42f;
+    float a = -HALF_PI + i * (PI / 5.0f);
+    px[i] = cx + rr * cosf(a);
+    py[i] = cy + rr * sinf(a);
+  }
+  for (int i = 0; i < 10; i++)
+  {
+    int j = (i + 1) % 10;
+    if (filled)
+      _sprite.fillTriangle(cx, cy, (int)px[i], (int)py[i], (int)px[j], (int)py[j], color);
+    else
+      _sprite.drawLine((int)px[i], (int)py[i], (int)px[j], (int)py[j], color);
+  }
+}
+
+// Today's stars (earned filled, remaining outlined) + a streak flame. Centered
+// horizontally; cyTop is the vertical center of the star row.
+void DisplayManager::_drawRewardPanel(int cyTop)
+{
+  auto &d = Config::instance().data;
+  int goal = d.dailyGoal < 1 ? 1 : d.dailyGoal;
+  int earned = d.rewardStars;
+
+  if (goal <= 6)
+  {
+    const int gap = 26;
+    int startX = 120 - (goal - 1) * gap / 2;
+    for (int i = 0; i < goal; i++)
+    {
+      bool got = i < earned;
+      _drawStar(startX + i * gap, cyTop, 9, got, got ? CLR_YELLOW : CLR_SUBTEXT);
+    }
+  }
+  else
+  {
+    _drawStar(96, cyTop, 9, earned > 0, earned > 0 ? CLR_YELLOW : CLR_SUBTEXT);
+    char b[12];
+    snprintf(b, sizeof(b), "%d / %d", earned, goal);
+    _sprite.setTextDatum(ML_DATUM);
+    _sprite.setTextColor(CLR_TEXT, CLR_BG);
+    _sprite.setTextSize(2);
+    _sprite.drawString(b, 116, cyTop);
+  }
+
+  _sprite.setTextDatum(MC_DATUM);
+  _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
+  _sprite.setTextSize(1);
+  {
+    char b[28];
+    snprintf(b, sizeof(b), "%d of %d stars today", earned, goal);
+    _sprite.drawString(b, 120, cyTop + 18);
+  }
+
+  if (d.streak > 0)
+  {
+    char b[20];
+    snprintf(b, sizeof(b), "%d day streak", d.streak);
+    _sprite.setTextSize(1);
+    int tw = _sprite.textWidth(b);
+    int fx = 120 - (tw + 14) / 2 + 5;
+    int fy = cyTop + 36;
+    _sprite.fillTriangle(fx, fy - 7, fx - 4, fy + 3, fx + 4, fy + 3, CLR_ORANGE);
+    _sprite.fillCircle(fx, fy + 3, 4, CLR_RED);
+    _sprite.fillCircle(fx, fy + 1, 2, CLR_YELLOW);
+    _sprite.setTextDatum(ML_DATUM);
+    _sprite.setTextColor(CLR_ORANGE, CLR_BG);
+    _sprite.drawString(b, fx + 10, fy);
+  }
+  _sprite.setTextDatum(TL_DATUM);
+}
+
 void DisplayManager::_drawCurrentTask()
 {
   const int top = STATUS_BAR_H + WEATHER_ROW_H; // 66 — card starts right after the weather row
@@ -709,7 +799,10 @@ void DisplayManager::_drawCurrentTask()
     _sprite.setTextSize(1);
     _sprite.drawString("No active task", 120, top + 20);
     _sprite.setTextDatum(TL_DATUM);
-    _drawSleepyAstronaut(120, (top + bottom) / 2 + 20);
+    // Reward progress (stars today + streak) fills the idle screen -- a natural
+    // "check how I'm doing" moment when nothing is scheduled.
+    _drawRewardPanel(top + 46);
+    _drawSleepyAstronaut(120, bottom - 40);
     return;
   }
 
@@ -750,7 +843,8 @@ void DisplayManager::_drawCurrentTask()
   _sprite.setTextDatum(TL_DATUM);
 
   // ── Time-remaining visual — rocket race, centered in the space between
-  // the task name and the next-task strip. ─────────────────────────────────
+  // the task name and the next-task strip. (The rainbow dial is a manual-timer
+  // style only; it looked cramped here, so the home card always uses this.) ──
   _drawTimeVisual(120, 200, 95,
                   sched.progressPct(), sched.remainingSec(), t->durationMin * 60,
                   urgency, arcColor);
@@ -1189,16 +1283,11 @@ void DisplayManager::showIpToast()
 // (see main.cpp's onTaskEvent, TaskEvent::COMPLETE). Unlike the other
 // overlays, this one keeps redrawing itself for its whole duration --
 // tickOverlay() below drives that -- rather than being drawn once on entry.
-void DisplayManager::showTaskCompleteAnimation()
+void DisplayManager::startTaskCelebration()
 {
-  _lastOverlayFrameMs = 0;
-  _drawTaskCompleteAnimation(0.0f);
-  _present();
-
-  _overlayKind = OverlayKind::TASK_COMPLETE;
-  _overlayDurationMs = 4000;
-  _overlayStart = millis();
-  _overlayAwaitingRelease = true; // don't let the still-held opening tap dismiss it
+  _celebrating = true;
+  _celebrateStart = millis();
+  _celebrateLastFrame = 0;
 }
 
 // Call this every loop() iteration. Non-blocking: checks for a tap or
@@ -1213,17 +1302,6 @@ void DisplayManager::tickOverlay()
 
   uint32_t elapsed = millis() - _overlayStart;
   bool timedOut = elapsed >= _overlayDurationMs;
-
-  if (_overlayKind == OverlayKind::TASK_COMPLETE && !timedOut)
-  {
-    if (millis() - _lastOverlayFrameMs > 50)
-    {
-      _lastOverlayFrameMs = millis();
-      float t = (float)elapsed / (float)_overlayDurationMs;
-      _drawTaskCompleteAnimation(t);
-      _present();
-    }
-  }
 
   uint16_t tx, ty;
   bool touched = _getLogicalTouch(tx, ty);
@@ -1316,50 +1394,71 @@ void DisplayManager::_drawIpToast()
 // launch pad, the flame flickers, and the same starfield backdrop used
 // elsewhere ties it into the rest of the space theme.
 // ─────────────────────────────────────────────────────────────────────────────
-void DisplayManager::_drawTaskCompleteAnimation(float t)
+// Task-complete flourish: a small rocket orbits the current-task card (the band
+// between the weather row and the next-task strip) for a few seconds. Redrawn
+// ~18 fps and pushes ONLY the card region -- no full-screen blocking push, so it
+// never starves the audio the way the old celebration did. Non-blocking; the
+// main loop keeps running (touch, audio) throughout.
+void DisplayManager::tickCelebration()
 {
-  _sprite.fillRect(0, 0, SPRITE_W, SPRITE_H, CLR_BG);
-  _drawStarfield(0, SPRITE_H);
+  const uint32_t DURATION = 3500;
 
-  _sprite.setTextDatum(TC_DATUM);
-  _sprite.setTextColor(CLR_GREEN, CLR_BG);
-  _sprite.setTextSize(3);
-  _sprite.drawString("Great job!", SPRITE_W / 2, 30);
-  _sprite.setTextDatum(TL_DATUM);
-
-  // Rocket climbs from near the bottom to well off the top of the screen
-  const int startY = SPRITE_H - 70;
-  const int endY = -60;
-  int ry = startY + (int)((endY - startY) * t);
-  int rx = SPRITE_W / 2 + (int)(sinf(t * 18.0f) * 4.0f); // slight wobble for character
-
-  // Smoke puffs left behind near the launch pad, growing/fading as t advances
-  for (int i = 0; i < 4; i++)
+  if (_screen != Screen::HOME) // only valid on HOME; bail if we've navigated away
   {
-    float puffT = t - i * 0.07f;
-    if (puffT > 0.0f && puffT < 1.0f)
-    {
-      int py = startY + 26 + (int)(puffT * 50.0f);
-      int px = SPRITE_W / 2 + ((i % 2 == 0) ? -1 : 1) * (int)(puffT * 26.0f);
-      int prad = 4 + (int)(puffT * 10.0f);
-      if (py < SPRITE_H + prad)
-        _sprite.fillCircle(px, py, prad, CLR_SUBTEXT);
-    }
+    _celebrating = false;
+    return;
   }
 
-  // Flame -- flickers, trails below the rocket (opposite of travel = up)
-  int flameLen = 14 + (int)(sinf(t * 36.0f) * 6.0f);
-  uint32_t flameColor = (((int)(t * 20.0f)) % 2 == 0) ? CLR_ORANGE : CLR_YELLOW;
-  _sprite.fillTriangle(rx - 8, ry + 20, rx + 8, ry + 20, rx, ry + 20 + flameLen, flameColor);
+  uint32_t elapsed = millis() - _celebrateStart;
+  if (elapsed >= DURATION)
+  {
+    _celebrating = false;
+    _forceFullRedraw = true; // clean repaint of the card without the rocket
+    return;
+  }
 
-  // Fins
-  _sprite.fillTriangle(rx - 12, ry + 14, rx - 4, ry + 14, rx - 12, ry + 24, CLR_ACCENT);
-  _sprite.fillTriangle(rx + 12, ry + 14, rx + 4, ry + 14, rx + 12, ry + 24, CLR_ACCENT);
+  if (millis() - _celebrateLastFrame < 55) return; // ~18 fps
+  _celebrateLastFrame = millis();
 
-  // Body + window + nose cone
-  _sprite.fillRoundRect(rx - 10, ry - 16, 20, 32, 8, CLR_TEXT);
-  _sprite.fillCircle(rx, ry - 4, 5, CLR_ACCENT);
-  _sprite.fillTriangle(rx - 10, ry - 16, rx + 10, ry - 16, rx, ry - 30, CLR_RED);
+  const int top        = STATUS_BAR_H + WEATHER_ROW_H; // 66
+  const int animBottom = 240;                          // stop above the next-task strip
+
+  _drawCurrentTask();                                  // repaint the card content
+  _drawCelebrationRocket((float)elapsed / (float)DURATION);
+  AudioManager::instance().loop();                     // keep audio fed across the push
+  _pushRegion(0, top, 240, animBottom - top);          // push just the card band
+}
+
+// Small rocket on an elliptical orbit inside the card band, nose pointed along
+// its direction of travel with a short flickering flame trail behind it.
+void DisplayManager::_drawCelebrationRocket(float t)
+{
+  const float cx = 120.0f, cy = 153.0f; // centre of the 66..240 band
+  const float rx = 96.0f,  ry = 74.0f;  // orbit radii (stays within the band)
+  const int   LOOPS = 2;
+
+  float ang = -HALF_PI + t * TWO_PI * LOOPS;
+  float px = cx + rx * cosf(ang);
+  float py = cy + ry * sinf(ang);
+
+  // Heading = tangent to the ellipse, normalised; nx/ny is perpendicular.
+  float dx = -rx * sinf(ang), dy = ry * cosf(ang);
+  float dl = sqrtf(dx * dx + dy * dy);
+  if (dl < 0.001f) dl = 1.0f;
+  dx /= dl; dy /= dl;
+  float nx = -dy, ny = dx;
+
+  int nX  = (int)(px + dx * 9),           nY  = (int)(py + dy * 9);            // nose
+  int b1X = (int)(px - dx * 5 + nx * 5),  b1Y = (int)(py - dy * 5 + ny * 5);   // base corners
+  int b2X = (int)(px - dx * 5 - nx * 5),  b2Y = (int)(py - dy * 5 - ny * 5);
+
+  int fl = 8 + (int)(sinf(t * 40.0f) * 4.0f); // flickering flame length
+  uint32_t flame = (((int)(t * 24.0f)) % 2 == 0) ? CLR_ORANGE : CLR_YELLOW;
+  _sprite.fillTriangle(b1X, b1Y, b2X, b2Y,
+                       (int)(px - dx * (5 + fl)), (int)(py - dy * (5 + fl)), flame);
+
+  _sprite.fillTriangle(nX, nY, b1X, b1Y, b2X, b2Y, CLR_TEXT); // body
+  _sprite.fillCircle((int)px, (int)py, 2, CLR_ACCENT);        // window
 }
 
 void DisplayManager::_drawTaskList()
@@ -1563,7 +1662,7 @@ void DisplayManager::_drawClothingOverlay(const std::vector<ClothingItem> &items
   _sprite.fillRect(0, 0, 240, 28, CLR_STATUSBG);
   _sprite.setTextDatum(MC_DATUM);
   _sprite.setTextColor(CLR_TEXT, CLR_STATUSBG);
-  _sprite.setTextSize(1);
+  _sprite.setTextSize(2);
   _sprite.drawString("What to Wear", 120, 14);
   // Back cue: a "<" chevron at the top-left. The overlay dismisses on a tap
   // anywhere (see tickOverlay), so this is a visible "tap to go back" hint.
@@ -1581,6 +1680,7 @@ void DisplayManager::_drawClothingOverlay(const std::vector<ClothingItem> &items
                                   "F",
            weather.description.substring(0, 16).c_str());
   _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
+  _sprite.setTextSize(1);
   _sprite.drawString(summary, 120, 42);
 
   // ── Icon + label list -- one row per recommended item: a small pictogram
@@ -1605,16 +1705,28 @@ void DisplayManager::_drawClothingOverlay(const std::vector<ClothingItem> &items
   const int labelX = 46;                  // text starts here
   const int maxLabelW = 240 - labelX - 6; // width available for the label
 
+  // Uniform, and as LARGE as fits: try up to size 3, take the largest that fits
+  // EVERY label, but never below 2 (a long label gets truncated rather than
+  // shrinking the whole list to a tiny size). Cap by row height so a big font
+  // can't overflow a short row when there are many items.
+  int uniformTs = 3;
+  for (int i = 0; i < n; i++)
+  {
+    int fit = _fitTextSize(items[i].label, 3, maxLabelW);
+    if (fit < uniformTs) uniformTs = fit;
+  }
+  if (uniformTs < 2) uniformTs = 2;
+  if (rowH < 26 && uniformTs > 2) uniformTs = 2;
+
   _sprite.setTextDatum(ML_DATUM); // middle-left: vertically center label on the row
+  _sprite.setTextColor(CLR_TEXT, CLR_BG);
+  _sprite.setTextSize(uniformTs);
   for (int i = 0; i < n; i++)
   {
     int cy = listTop + rowH * i + rowH / 2;
     if (cy + iconBox / 2 > 318) break; // clip an unusually long list at the bottom edge
     _drawClothingIcon(items[i].icon, iconCx, cy, iconBox);
-    int ts = _fitTextSize(items[i].label, 2, maxLabelW);
-    _sprite.setTextSize(ts);
-    _sprite.setTextColor(CLR_TEXT, CLR_BG);
-    _sprite.drawString(_truncateToFit(items[i].label, ts, maxLabelW), labelX, cy);
+    _sprite.drawString(_truncateToFit(items[i].label, uniformTs, maxLabelW), labelX, cy);
   }
   _sprite.setTextDatum(TL_DATUM);
   _sprite.setTextSize(1);
@@ -1738,6 +1850,9 @@ void DisplayManager::startTimer(uint32_t seconds)
   _timerStartMillis = millis();
   _timerRunning = true;
   _timerDone = false;
+  _schedPeek = false; // start with the scheduled-task overlay minimized
+  Serial.printf("[Timer] start %lus, timerStyle=%d (1=rainbow dial)\n",
+                (unsigned long)seconds, Config::instance().data.timerStyle);
   setScreen(Screen::TIMER_RUNNING);
 }
 
@@ -1821,6 +1936,14 @@ void DisplayManager::_drawTimerRunning()
     }
   }
 
+  // Rainbow visual-timer variant hands off the whole time-display area; the
+  // shared Cancel/OK button below still draws for both styles.
+  if (Config::instance().data.timerStyle == 1)
+  {
+    _drawTimerRainbowDial(120, 116, 92, remaining, _timerDurationSec, _timerDone, /*compact=*/false);
+  }
+  else
+  {
   _sprite.setTextDatum(MC_DATUM);
 
   if (_timerDone)
@@ -1850,11 +1973,207 @@ void DisplayManager::_drawTimerRunning()
     _sprite.setTextColor(CLR_SUBTEXT, CLR_BG);
     _sprite.drawString("Tap below to cancel", 120, 210);
   }
+  }  // end timerStyle==0 (digital) branch
 
   _sprite.fillRoundRect(60, 260, 120, 40, 8, CLR_CARD);
   _sprite.drawRoundRect(60, 260, 120, 40, 8, CLR_RED);
   _sprite.setTextColor(CLR_RED, CLR_CARD);
+  // Center the label explicitly -- the rainbow-dial branch leaves the datum as
+  // top-left, which pushed "Cancel" off-center; set it here for BOTH styles.
+  _sprite.setTextDatum(MC_DATUM);
+  _sprite.setTextSize(2);
   _sprite.drawString(_timerDone ? "OK" : "Cancel", 120, 280);
+  _sprite.setTextSize(1);
+  _sprite.setTextDatum(TL_DATUM);
+
+  // "Scheduled task is running" overlay (minimized badge or expanded card),
+  // drawn last so it sits on top of the timer.
+  _drawSchedPeek();
+}
+
+void DisplayManager::toggleSchedPeek()
+{
+  _schedPeek = !_schedPeek; // timer screen is alwaysRepaint, so it redraws next tick
+}
+
+// Shown only while a scheduled task is active. Minimized: a small pulsing clock
+// badge in the top-right corner. Expanded (tap the badge): a status card over
+// the timer showing the scheduled task's group, name, remaining time and
+// progress; tap the card to minimize again. The manual timer keeps running
+// underneath in both states.
+void DisplayManager::_drawSchedPeek()
+{
+  auto &sched = TaskScheduler::instance();
+  const Task *st = sched.currentTask();
+  if (!st) return; // no scheduled task active -> nothing to show
+
+  if (!_schedPeek)
+  {
+    // Minimized: pulsing clock badge, top-right corner.
+    bool pulse = ((int)_gaugeAnimT % 2) == 0;
+    uint32_t bg = pulse ? CLR_ACCENT : 0x03BF;
+    _sprite.fillRoundRect(198, 6, 40, 34, 6, bg);
+    int bx = 218, by = 23;
+    _sprite.drawCircle(bx, by, 9, CLR_BG);
+    _sprite.drawLine(bx, by, bx, by - 5, CLR_BG);
+    _sprite.drawLine(bx, by, bx + 4, by, CLR_BG);
+    return;
+  }
+
+  // Expanded: status card overlaying the timer.
+  _sprite.fillRoundRect(10, 44, 220, 170, 10, CLR_CARD);
+  _sprite.drawRoundRect(10, 44, 220, 170, 10, CLR_ACCENT);
+
+  _sprite.setTextDatum(TC_DATUM);
+  _sprite.setTextColor(CLR_ACCENT, CLR_CARD);
+  _sprite.setTextSize(2);
+  _sprite.drawString("Scheduled Now", 120, 54);
+
+  if (sched.currentGroup())
+  {
+    _sprite.setTextColor(CLR_SUBTEXT, CLR_CARD);
+    _sprite.setTextSize(1);
+    _sprite.drawString(sched.currentGroup()->name.c_str(), 120, 80);
+  }
+
+  _sprite.setTextColor(CLR_TEXT, CLR_CARD);
+  int ns = _fitTextSize(st->name, 2, 200);
+  _sprite.setTextSize(ns);
+  _sprite.drawString(_truncateToFit(st->name, ns, 200).c_str(), 120, 98);
+
+  uint32_t rem = sched.remainingSec();
+  char rb[12];
+  snprintf(rb, sizeof(rb), "%02lu:%02lu", (unsigned long)(rem / 60), (unsigned long)(rem % 60));
+  _sprite.setTextColor(CLR_ACCENT, CLR_CARD);
+  _sprite.setTextSize(3);
+  _sprite.drawString(rb, 120, 132);
+
+  float pct = sched.progressPct() / 100.0f;
+  if (pct < 0) pct = 0;
+  if (pct > 1) pct = 1;
+  _sprite.drawRoundRect(30, 166, 180, 10, 4, CLR_SUBTEXT);
+  if (pct > 0) _sprite.fillRoundRect(31, 167, (int)(178 * pct), 8, 3, CLR_ACCENT);
+
+  _sprite.setTextColor(CLR_SUBTEXT, CLR_CARD);
+  _sprite.setTextSize(1);
+  _sprite.drawString("Tap to hide", 120, 196);
+  _sprite.setTextDatum(TL_DATUM);
+}
+
+// ── Rainbow visual-timer dial (Time Timer style) ────────────────────────────
+// A fixed 60-minute clock face: minute numbers 0..55 around the rim, and a
+// concentric rainbow wedge (red outer -> violet inner) whose angular size is
+// exactly `remaining/60` of the full circle, anchored at 12 o'clock and
+// depleting clockwise as time runs down. Drawn from primitives (triangle-fan
+// wedge + circles + text) so it fits the 8-bit sprite renderer. Durations >60
+// min (only reachable if this style is ever used for long tasks) show a full
+// disc plus an "H:MM+" readout until under an hour remains.
+// Parameterized so BOTH timers can use it: the manual timer draws it full-size
+// with rim numbers (compact=false); the home current-task card draws a smaller
+// compact version (no rim numbers, no hub) that fits between the task name and
+// the next-task strip. cx/cy/R place and size the dial; the MM:SS readout sits
+// just below it.
+void DisplayManager::_drawTimerRainbowDial(int cx, int cy, int R, uint32_t remainingSec,
+                                           uint32_t totalSec, bool done, bool compact)
+{
+  (void)totalSec; // dial is always a 60-min face; remaining alone sets the wedge
+
+  // Rainbow bands, outer(red) -> inner(violet), RGB565.
+  static const uint32_t band[7] = {
+    0xF800, 0xFCA0, 0xFFE0, 0x07E0, 0x07FF, 0x021F, 0x8017
+  };
+  // Minute-number colours chosen to stay legible on the white face.
+  static const uint32_t numCol[6] = {
+    0xF800, 0xFB40, 0x0480, 0x021F, 0x8017, 0xC018
+  };
+  const uint32_t bezel = 0x6E5C; // soft blue rim
+  const uint32_t hubC  = 0x4ABE; // centre hub
+
+  // Bezel + white face
+  _sprite.fillCircle(cx, cy, R + 6, bezel);
+  _sprite.fillCircle(cx, cy, R,     CLR_TEXT);
+
+  // Minute numbers 0,5,...,55 around the rim (full dial only -- too cramped on
+  // the compact home-card version).
+  if (!compact)
+  {
+    _sprite.setTextDatum(MC_DATUM);
+    _sprite.setTextSize(2);
+    const float numR = R * 0.86f;
+    for (int k = 0; k < 12; k++)
+    {
+      float a  = -HALF_PI + k * (PI / 6.0f);
+      int   nx = cx + (int)(numR * cosf(a));
+      int   ny = cy + (int)(numR * sinf(a));
+      char  nb[4];
+      snprintf(nb, sizeof(nb), "%d", k * 5);
+      _sprite.setTextColor(numCol[k % 6], CLR_TEXT);
+      _sprite.drawString(nb, nx, ny);
+    }
+    _sprite.setTextSize(1);
+  }
+
+  // Rainbow wedge = remaining fraction of the 60-min dial
+  if (!done)
+  {
+    float frac = (remainingSec / 60.0f) / 60.0f; // remaining minutes / 60
+    if (frac > 1.0f) frac = 1.0f;                // >60 min -> full disc
+    if (frac > 0.0f)
+    {
+      const float start  = -HALF_PI;
+      const float sweep  = frac * TWO_PI;
+      const float rOuter = R * 0.74f, rInner = R * 0.20f;
+      const float step   = 0.09f; // ~5 deg facets
+      for (int b = 0; b < 7; b++)
+      {
+        float rb = rOuter - b * (rOuter - rInner) / 6.0f;
+        for (float a = start; a < start + sweep - 1e-4f; a += step)
+        {
+          float a2 = a + step;
+          if (a2 > start + sweep) a2 = start + sweep;
+          _sprite.fillTriangle(
+            cx, cy,
+            cx + (int)(rb * cosf(a)),  cy + (int)(rb * sinf(a)),
+            cx + (int)(rb * cosf(a2)), cy + (int)(rb * sinf(a2)),
+            band[b]);
+        }
+      }
+    }
+  }
+
+  // Centre hub (full dial only) + 12 o'clock start marker
+  if (!compact)
+  {
+    _sprite.fillCircle(cx, cy, (int)(R * 0.17f), hubC);
+    _sprite.fillCircle(cx, cy, (int)(R * 0.10f), bezel);
+  }
+  _sprite.fillTriangle(cx, cy - R - 2, cx - 5, cy - R + 9, cx + 5, cy - R + 9, CLR_RED);
+
+  // Readout below the dial (MM:SS, or "H:MM+" when over an hour remains).
+  const int readoutY  = compact ? (cy + R + 12) : (cy + R + 28);
+  const int readoutSz = compact ? 2 : 3;
+  _sprite.setTextDatum(MC_DATUM);
+  _sprite.setTextSize(readoutSz);
+  if (done)
+  {
+    _sprite.setTextColor(CLR_ACCENT, CLR_BG);
+    _sprite.drawString(compact ? "Done!" : "Time's Up!", cx, readoutY);
+  }
+  else
+  {
+    char buf[12];
+    if (remainingSec >= 3600)
+      snprintf(buf, sizeof(buf), "%lu:%02lu+",
+               (unsigned long)(remainingSec / 3600),
+               (unsigned long)((remainingSec % 3600) / 60));
+    else
+      snprintf(buf, sizeof(buf), "%02lu:%02lu",
+               (unsigned long)(remainingSec / 60),
+               (unsigned long)(remainingSec % 60));
+    _sprite.setTextColor(CLR_TEXT, CLR_BG);
+    _sprite.drawString(buf, cx, readoutY);
+  }
+  _sprite.setTextSize(1);
   _sprite.setTextDatum(TL_DATUM);
 }
 
@@ -1866,6 +2185,16 @@ int DisplayManager::_handleTimerRunningTouch(uint16_t tx, uint16_t ty)
   // confirmed-rising-edge path is what actually calls setScreen(HOME). The
   // timer-state reset now happens in setScreen() itself whenever leaving
   // TIMER_RUNNING, so it doesn't need to happen here.
+  // Scheduled-task peek toggle -- only when a scheduled task is actually active.
+  if (TaskScheduler::instance().currentTask() != nullptr)
+  {
+    if (_schedPeek)
+    {
+      if (ty >= 44 && ty < 214 && tx >= 10 && tx < 230) return 7; // tap card -> minimize
+    }
+    else if (ty >= 6 && ty < 42 && tx >= 196) return 7;          // tap badge -> expand
+  }
+
   if (ty >= 260 && ty < 300 && tx >= 60 && tx < 180)
     return 3;
   return 0; // touched elsewhere on the timer screen -> neutral, so a tap still wakes it

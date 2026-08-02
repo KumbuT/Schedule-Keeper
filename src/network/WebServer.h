@@ -16,11 +16,14 @@ private:
   void   _setupRoutes();
   void   _onWsEvent(AsyncWebSocket*, AsyncWebSocketClient*,
                     AwsEventType, void*, uint8_t*, size_t);
-  String _buildStatusJson();
+  const String &_buildStatusJson();
 
   // Reused across every 1 Hz status broadcast instead of constructing a fresh
   // JsonDocument each second. clear() keeps the already-grown internal pool, so
   // repeated broadcasts stop churning (and fragmenting) the heap. Only touched
   // from the single-threaded main loop, so no locking is needed.
   JsonDocument _statusDoc;
+  // Reused serialized-JSON buffer (reserve()'d once) so the 1 Hz broadcast
+  // doesn't heap-allocate a fresh String every second.
+  String _statusJson;
 };

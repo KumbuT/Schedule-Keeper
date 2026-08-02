@@ -30,7 +30,6 @@ void BacklightManager::wake() {
   if (_dimmed) {
     _dimmed = false;
     setBrightness(_fullBrightness);
-    Serial.println("[Backlight] Wake");
   }
 }
 
@@ -48,7 +47,6 @@ void BacklightManager::tick() {
       setBrightness(next);
     } else {
       _dimmed = true;
-      Serial.println("[Backlight] Dimmed");
     }
   }
 }

@@ -305,6 +305,25 @@ void startAP()
                                                "setup1234", "192.168.4.1");
 }
 
+// Local calendar day as a day-index (days since 1970-01-01) for the reward /
+// streak logic -- uses the civil-from-date algorithm so "yesterday" is just
+// today-1 with no month/year edge cases. Returns -1 until the clock is synced
+// so we never mangle reward state against a bogus 1970 date. Non-static so the
+// web server can reach it too (declared extern there).
+int localDayIndex()
+{
+  time_t now = time(nullptr);
+  struct tm *lt = localtime(&now);
+  if (!lt || lt->tm_year + 1900 < 2023) return -1;
+  int y = lt->tm_year + 1900, m = lt->tm_mon + 1, d = lt->tm_mday;
+  y -= (m <= 2);
+  int era = (y >= 0 ? y : y - 399) / 400;
+  int yoe = y - era * 400;
+  int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
 // ─── Task event handler ───────────────────────────────────────────────────────
 void onTaskEvent(const Task &task, TaskEvent event)
 {
@@ -338,9 +357,11 @@ void onTaskEvent(const Task &task, TaskEvent event)
     if (!muted)
       AudioManager::instance().play(
           task.audioDone.isEmpty() ? "/audio/done.wav" : task.audioDone.c_str());
-    // Full-screen rocket-launch celebration -- always plays regardless of
-    // mute, since it's visual, not audio.
-    DisplayManager::instance().showTaskCompleteAnimation();
+    // NOTE: stars are NOT auto-awarded on completion (too easy to game) -- a
+    // parent grants them from the dashboard (index.html -> POST /api/star).
+    // Small rocket orbits the task card for a few seconds (non-blocking, so it
+    // doesn't starve the audio the way the old full-screen animation did).
+    DisplayManager::instance().startTaskCelebration();
     break;
   }
 }
@@ -351,6 +372,11 @@ void setup()
   Serial.begin(115200);
   delay(200);
   Serial.println("\n[Boot] Schedule Tracker starting...");
+
+  // Run at 80 MHz instead of the 160 MHz default: the UI renders ~1 fps and the
+  // main loop mostly polls touch, so this roughly halves core power draw. WiFi
+  // still works (it requires >= 80 MHz).
+  setCpuFrequencyMhz(80);
 
   // NVS backs both WiFi's saved credentials and DisplayManager's touch
   // calibration (via Preferences). This project's flashing history included
@@ -429,6 +455,7 @@ void loop()
     time_t t = time(nullptr);
     std::tm *tm_now = localtime(&t);
     TaskScheduler::instance().tick(tm_now);
+    Config::instance().rewardTick(localDayIndex()); // daily reset + streak upkeep
     // In AP setup mode the setup screen owns the display -- don't repaint the
     // home screen over it.
     if (!apMode && !DisplayManager::instance().overlayActive())
@@ -479,6 +506,12 @@ void loop()
   }
   else
   {
+    // Task-complete flourish: a small rocket orbits the task card for a few
+    // seconds. Non-blocking (redraws only the card band), so the touch machine
+    // below keeps working during it.
+    if (DisplayManager::instance().celebrating())
+      DisplayManager::instance().tickCelebration();
+
     // Edge-triggered (only act on the transition from "no touch" to "touch
     // detected in some zone", not on every poll while a touch keeps reading
     // as present) PLUS a small debounce requiring that zone to read
@@ -616,10 +649,17 @@ void loop()
           DisplayManager::instance().showClothingOverlay();
           break;
         case 5:
-          DisplayManager::instance().setScreen(Screen::TIMER_SET);
+          // Manual timer is disabled while a scheduled task is running -- ignore
+          // the tap (the nav icon is drawn dimmed to signal this).
+          if (TaskScheduler::instance().currentTask() == nullptr)
+            DisplayManager::instance().setScreen(Screen::TIMER_SET);
           break;
         case 6:
           DisplayManager::instance().showIpToast();
+          break;
+        case 7:
+          // Expand/minimize the scheduled-task overlay on the manual timer.
+          DisplayManager::instance().toggleSchedPeek();
           break;
         }
       }
@@ -629,4 +669,10 @@ void loop()
 
   // ── Audio ──────────────────────────────────────────────────────────────────
   AudioManager::instance().loop();
+
+  // Yield ~5 ms so the core can idle/light-sleep instead of busy-spinning at
+  // 100%. Touch still polls at ~200 Hz (far more than needed), and the debounce
+  // window (CONFIRM_POLLS consecutive reads) now spans a useful ~15 ms for real
+  // noise rejection rather than <1 ms.
+  delay(5);
 }

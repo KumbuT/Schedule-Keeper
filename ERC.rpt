@@ -1,0 +1,71 @@
+ERC report (2026-07-27T21:58:35-0700, Encoding UTF8)
+
+***** Sheet /
+[pin_not_connected]: Pin not connected
+    ; error
+    @(39.84 mm, 129.68 mm): Symbol U1 Pin 15 [D3/MTDI, Passive, Line]
+[pin_not_connected]: Pin not connected
+    ; error
+    @(43.65 mm, 129.68 mm): Symbol U1 Pin 16 [D5/MTDO, Passive, Line]
+[pin_not_connected]: Pin not connected
+    ; error
+    @(47.46 mm, 129.68 mm): Symbol U1 Pin 17 [EN, Passive, Line]
+[pin_not_connected]: Pin not connected
+    ; error
+    @(55.08 mm, 129.68 mm): Symbol U1 Pin 19 [D2/MTMS, Passive, Line]
+[pin_not_connected]: Pin not connected
+    ; error
+    @(58.89 mm, 129.68 mm): Symbol U1 Pin 20 [D4/MTCK, Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(28.41 mm, 142.38 mm): Symbol U1 Pin 1 [D0, Passive, Line]
+[lib_symbol_issues]: Symbol 'XIAO-ESP32-C3-SMD' not found in symbol library 'Seeed_XIAO'
+    ; warning
+    @(50.00 mm, 150.00 mm): Symbol U1 [XIAO-ESP32-C3-SMD]
+[global_label_dangling]: Global label not connected anywhere else in the schematic
+    ; warning
+    @(70.32 mm, 142.38 mm): Global Label 'VUSB_5V'
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(164.92 mm, 72.38 mm): Symbol U2 Pin 1 [Pin_1, Passive, Line]
+[global_label_dangling]: Global label not connected anywhere else in the schematic
+    ; warning
+    @(164.92 mm, 80.00 mm): Global Label 'AMP_GAIN_NC'
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(164.92 mm, 100.00 mm): Symbol J2 Pin 1 [Pin_1, Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(100.00 mm, 165.00 mm): Symbol BP1 Pin 1 [1, Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(115.00 mm, 165.00 mm): Symbol BP2 Pin 1 [1, Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(94.92 mm, 190.00 mm): Symbol J1 Pin 1 [Pin_1, Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(194.92 mm, 100.00 mm): Symbol J4 Pin 1 [Pin_1, Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(164.92 mm, 144.76 mm): Symbol J3 Pin 1 [Pin_1, Passive, Line]
+[global_label_dangling]: Global label not connected anywhere else in the schematic
+    ; warning
+    @(164.92 mm, 177.78 mm): Global Label 'TFT_T_IRQ_NC'
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(240.00 mm, 111.19 mm): Symbol C1 Pin 1 [Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(240.00 mm, 131.19 mm): Symbol R1 Pin 1 [Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(240.00 mm, 151.19 mm): Symbol R2 Pin 1 [Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(240.00 mm, 166.19 mm): Symbol R3 Pin 1 [Passive, Line]
+[endpoint_off_grid]: Symbol pin or wire end off connection grid
+    ; warning
+    @(240.00 mm, 191.19 mm): Symbol R4 Pin 1 [Passive, Line]
+
+ ** ERC messages: 22  Errors 5  Warnings 17

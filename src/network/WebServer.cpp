@@ -2,6 +2,8 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include <Update.h>   // OTA: flash a new firmware image received over HTTP
+#include <esp_partition.h> // look up the filesystem partition size for U_SPIFFS
 #include <time.h>
 #include <vector>
 #include <algorithm>
@@ -23,6 +25,12 @@ extern WxState wxState;
 extern uint32_t wxBackoffUntil;
 extern uint32_t lastWxFetch;
 extern bool apMode;
+extern int localDayIndex(); // defined in main.cpp -- local day for reward logic
+
+// OTA error flag, shared between the /update upload + completion callbacks.
+// Set true on any begin/write/end failure across the (up to two) images in a
+// single upload; the device reboots only when it's still false.
+static bool s_otaError = false;
 
 AppWebServer &AppWebServer::instance()
 {
@@ -32,6 +40,8 @@ AppWebServer &AppWebServer::instance()
 
 void AppWebServer::begin()
 {
+  _statusJson.reserve(384); // one-time grow; reused by every status broadcast
+
   // CORS headers for browser dev access
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
 
@@ -153,6 +163,8 @@ void AppWebServer::_setupRoutes()
     doc["city"]     = cfg.data.city;
     doc["metric"]   = cfg.data.metricUnits;
     doc["muted"]    = cfg.data.muted;
+    doc["tstyle"]   = cfg.data.timerStyle;
+    doc["rgoal"]    = cfg.data.dailyGoal;
 
     // Expose whether a key exists and its last 6 chars so the UI can show
     // a masked hint (e.g. "…a3f92c") without putting the full key in the page.
@@ -205,6 +217,19 @@ void AppWebServer::_setupRoutes()
         bool newMetric = doc["metric"].as<bool>();
         metricChanged = (newMetric != cfg.data.metricUnits);
         cfg.data.metricUnits = newMetric;
+      }
+
+      if (doc["tstyle"].is<int>()) {
+        int ts = doc["tstyle"].as<int>();
+        cfg.data.timerStyle = (ts == 1) ? 1 : 0;  // clamp to known styles
+        Serial.printf("[Config] timerStyle saved = %d\n", cfg.data.timerStyle);
+      }
+
+      if (doc["goal"].is<int>()) {
+        int g = doc["goal"].as<int>();
+        if (g < 1)  g = 1;
+        if (g > 50) g = 50;
+        cfg.data.dailyGoal = g;
       }
 
       // Only overwrite the OWM key if a non-empty value was submitted.
@@ -313,6 +338,109 @@ void AppWebServer::_setupRoutes()
       delay(800);
       ESP.restart(); });
 
+  // ── POST /update ── combined OTA (firmware + filesystem) ───────────────────
+  // Accepts firmware.bin and/or littlefs.bin in ONE multipart upload. Each file
+  // is routed to the right flash region by name (contains "littlefs"/"spiffs" ->
+  // filesystem partition via U_SPIFFS, otherwise the app slot via U_FLASH) and
+  // flashed in its own Update pass. The device reboots only if EVERY image
+  // flashed cleanly (s_otaError stays false). Firmware is A/B: a rejected or
+  // failed image leaves the current firmware active, so a bad upload can't brick
+  // the device -- worst case it stays on the old build. Unauthenticated: fine on
+  // a trusted home network; gate behind the planned parent PIN later if needed.
+  _server.on("/update", HTTP_POST,
+             [](AsyncWebServerRequest *req)
+             {
+               bool ok = !s_otaError;
+               AsyncWebServerResponse *resp = req->beginResponse(
+                   200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+               resp->addHeader("Connection", "close");
+               req->send(resp);
+               if (ok)
+               {
+                 delay(300);
+                 ESP.restart();
+               }
+             },
+             [](AsyncWebServerRequest *req, const String &filename, size_t index,
+                uint8_t *data, size_t len, bool final)
+             {
+               // Clear the error flag once at the start of each new request
+               // (the request pointer changes between uploads).
+               static AsyncWebServerRequest *otaReq = nullptr;
+               if (req != otaReq)
+               {
+                 otaReq = req;
+                 s_otaError = false;
+               }
+
+               if (index == 0)
+               {
+                 bool isFs = (filename.indexOf("littlefs") >= 0 ||
+                              filename.indexOf("spiffs") >= 0);
+                 int cmd = isFs ? U_SPIFFS : U_FLASH;
+                 size_t sz = UPDATE_SIZE_UNKNOWN;
+                 if (isFs)
+                 {
+                   // U_SPIFFS needs the real partition size; look it up.
+                   const esp_partition_t *p = esp_partition_find_first(
+                       ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+                   if (p) sz = p->size;
+                 }
+                 Serial.printf("[OTA] Start %s -> %s\n", filename.c_str(),
+                               isFs ? "filesystem" : "firmware");
+                 if (!Update.begin(sz, cmd))
+                 {
+                   s_otaError = true;
+                   Update.printError(Serial);
+                 }
+               }
+               if (!s_otaError && len && Update.write(data, len) != len)
+               {
+                 s_otaError = true;
+                 Update.printError(Serial);
+               }
+               if (final)
+               {
+                 if (!Update.end(true))
+                 {
+                   s_otaError = true;
+                   Update.printError(Serial);
+                 }
+                 else
+                 {
+                   Serial.printf("[OTA] %s done (%u bytes)\n", filename.c_str(),
+                                 (unsigned)(index + len));
+                 }
+               }
+             });
+
+  // ── POST /api/star ── parent grants (+1) or removes (-1) a reward star ──────
+  // Body: {"delta": 1} or {"delta": -1}. Stars are parent-controlled from the
+  // dashboard, not auto-earned, so a child can't farm them.
+  _server.on("/api/star", HTTP_POST, [](AsyncWebServerRequest *req) {}, nullptr,
+             [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t, size_t)
+             {
+               JsonDocument doc;
+               deserializeJson(doc, data, len);
+               int delta = doc["delta"] | 0;
+               int today = localDayIndex();
+               if (today < 0)
+               {
+                 req->send(409, "application/json", "{\"error\":\"clock_not_synced\"}");
+                 return;
+               }
+               auto &cfg = Config::instance();
+               if (delta > 0)
+                 cfg.rewardStar(today);
+               else if (delta < 0)
+                 cfg.rewardRemove(today);
+               AppWebServer::instance().broadcastStatus(); // update open dashboards now
+               char buf[80];
+               snprintf(buf, sizeof(buf), "{\"stars\":%d,\"goal\":%d,\"streak\":%d}",
+                        cfg.data.rewardStars, cfg.data.dailyGoal, cfg.data.streak);
+               req->send(200, "application/json", buf);
+             });
+
   // Captive portal catch-all redirect
   _server.onNotFound([](AsyncWebServerRequest *req)
                      { req->redirect("http://192.168.4.1/setup.html"); });
@@ -338,7 +466,7 @@ void AppWebServer::_setupRoutes()
                      { req->send(404, "text/plain", "Not found"); });
 }
 
-String AppWebServer::_buildStatusJson()
+const String &AppWebServer::_buildStatusJson()
 {
   auto &sched = TaskScheduler::instance();
   auto &bat = BatteryMonitor::instance();
@@ -361,6 +489,9 @@ String AppWebServer::_buildStatusJson()
   doc["battery_pct"] = bat.percentage();
   doc["rssi"] = WiFi.isConnected() ? (int)WiFi.RSSI() : 0;
   doc["muted"] = cfg.data.muted;
+  doc["stars"]  = cfg.data.rewardStars;
+  doc["goal"]   = cfg.data.dailyGoal;
+  doc["streak"] = cfg.data.streak;
 
   const Task *ct = sched.currentTask();
   if (ct)
@@ -389,9 +520,9 @@ String AppWebServer::_buildStatusJson()
   // Web dashboard uses this to show a warning banner with a /config link.
   doc["weather_error"] = wx.errorMsg;
 
-  String out;
-  serializeJson(doc, out);
-  return out;
+  _statusJson.clear(); // keeps the already-grown capacity
+  serializeJson(doc, _statusJson);
+  return _statusJson;
 }
 
 void AppWebServer::broadcastStatus()

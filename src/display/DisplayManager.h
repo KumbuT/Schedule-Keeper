@@ -37,7 +37,9 @@ public:
   void showApSetupScreen(const String &ssid, const String &pass, const String &url); // First-boot Wi-Fi setup instructions
   void showClothingOverlay();       // Draws and arms the overlay, returns immediately
   void showIpToast();               // Draws a temporary "IP: x.x.x.x" toast, returns immediately
-  void showTaskCompleteAnimation(); // Full-screen rocket-launch celebration, ~4s, plays once per task completion
+  void startTaskCelebration();      // small rocket orbits the task card for a few seconds on completion
+  bool celebrating() const { return _celebrating; }
+  void tickCelebration();           // call every loop iteration while celebrating() is true
   void tickOverlay();                // Call every loop() iteration while any overlay/toast is active
   bool overlayActive() const { return _overlayKind != OverlayKind::NONE; }
   bool consumeDirty()
@@ -52,6 +54,7 @@ public:
   // Returns touch zone: -1=none, 0=main, 1=allTasks, 2=mute, 3=back, 4=weather, 6=wifi icon
   int pollTouch();
   void startTimer(uint32_t seconds);
+  void toggleSchedPeek(); // expand/minimize the "scheduled task active" overlay on the manual timer
 
 private:
   int _touchStartY = 0;
@@ -80,7 +83,7 @@ private:
   // entry -- t is 0..1 progress through _overlayDurationMs, driving a
   // rocket that climbs from the bottom of the screen to launched-off-the-
   // top, using the full screen height for maximum drama.
-  void _drawTaskCompleteAnimation(float t);
+  void _drawCelebrationRocket(float t); // small orbiting rocket over the current-task card
 
   DisplayManager() : _sprite(&_tft) {}
 
@@ -141,6 +144,10 @@ private:
   DelegateWidget _timerRunScreen;   // full-screen running timer -> _drawTimerRunning()
   NavBarWidget _navBar;             // HOME nav bar, migrated to the widget model
   char _dateStr[16] = "";               // "Wkd dd Mon" date, shown in the weather row (moved off the top bar)
+  bool _schedPeek = false;              // scheduled-task overlay on the manual timer: false = minimized badge, true = expanded card
+  bool     _celebrating = false;        // task-complete rocket flourish active
+  uint32_t _celebrateStart = 0;         // millis the celebration began
+  uint32_t _celebrateLastFrame = 0;     // throttle for the celebration redraw
   bool _overlayAwaitingRelease = false; // ignore the still-held opening tap until the finger lifts
   int _ovDebounce = 0;                  // consecutive-poll counter for debounced overlay dismiss
 
@@ -272,6 +279,19 @@ private:
   void _drawProgressBar(int x, int y, int w, int h, float pct, uint32_t color);
   void _drawTimerSet();
   void _drawTimerRunning();
+  // Rainbow visual-timer dial variant (Time Timer style): fixed 60-minute face
+  // with a concentric rainbow wedge that depletes clockwise. Selected via
+  // Config.timerStyle == 1; branched from _drawTimerRunning().
+  void _drawTimerRainbowDial(int cx, int cy, int R, uint32_t remainingSec,
+                             uint32_t totalSec, bool done, bool compact);
+  // "Scheduled task is running" overlay shown on the manual timer screen:
+  // a minimized corner badge, or an expanded status card. _schedPeek is the
+  // expanded/minimized state (default minimized).
+  void _drawSchedPeek();
+  // Reward/streak visuals. _drawStar draws a small 5-point star (filled = earned).
+  // _drawRewardPanel shows today's stars + streak on the idle home scene.
+  void _drawStar(int cx, int cy, int r, bool filled, uint32_t color);
+  void _drawRewardPanel(int cyTop);
   int _handleTimerSetTouch(uint16_t tx, uint16_t ty);
   int _handleTimerRunningTouch(uint16_t tx, uint16_t ty);
 

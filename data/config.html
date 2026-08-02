@@ -5,74 +5,78 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Schedule Tracker — Config</title>
 <style>
+  /* Sizes tuned for a phone: 16px base so text is legible and inputs don't
+     trigger iOS/Android focus-zoom (which fires below 16px); larger touch
+     targets throughout. */
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   :root { --bg:#101828; --card:#1a2235; --accent:#00c8ff; --text:#e8f0fe;
            --sub:#6b7fa3; --border:#1e2d45; --red:#f25c5c; --green:#34d97b; }
   body { background:var(--bg); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-         color:var(--text); padding:16px; max-width:480px; margin:0 auto; }
-  h1 { font-size:18px; font-weight:600; margin-bottom:4px; }
-  p.sub { font-size:12px; color:var(--sub); margin-bottom:20px; }
-  .section { margin-bottom:24px; }
-  .section-title { font-size:10px; text-transform:uppercase; letter-spacing:.12em;
-                    color:var(--accent); margin-bottom:10px; padding-bottom:6px;
+         color:var(--text); padding:18px; max-width:560px; margin:0 auto; font-size:16px; line-height:1.4; }
+  h1 { font-size:26px; font-weight:600; margin-bottom:6px; }
+  p.sub { font-size:15px; color:var(--sub); margin-bottom:22px; }
+  .section { margin-bottom:28px; }
+  .section-title { font-size:13px; text-transform:uppercase; letter-spacing:.12em;
+                    color:var(--accent); margin-bottom:12px; padding-bottom:7px;
                     border-bottom:1px solid var(--border); }
-  .field { margin-bottom:12px; }
-  .config-label { font-size:11px; color:var(--sub); margin-bottom:3px; display:block; }
+  .field { margin-bottom:16px; }
+  .config-label { font-size:14px; color:var(--sub); margin-bottom:5px; display:block; }
   .config-input { width:100%; background:var(--card); border:1px solid var(--border);
-                   border-radius:6px; padding:7px 10px; font-size:12px; color:var(--text);
+                   border-radius:8px; padding:12px; font-size:16px; color:var(--text);
                    font-family:inherit; outline:none; }
-  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  .save-btn { width:100%; padding:10px; background:var(--accent); border-radius:8px;
-               font-size:13px; font-weight:700; color:#000; border:none;
-               cursor:pointer; margin-top:4px; font-family:inherit; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .save-btn { width:100%; padding:14px; background:var(--accent); border-radius:10px;
+               font-size:17px; font-weight:700; color:#000; border:none;
+               cursor:pointer; margin-top:6px; font-family:inherit; }
   .owm-hint-box { display:flex; align-items:center; gap:10px; background:var(--card);
-                   border:1px solid var(--border); border-radius:6px; padding:7px 10px;
-                   font-size:12px; }
-  .owm-dot { width:8px; height:8px; border-radius:50%; background:var(--green); flex-shrink:0; }
-  .owm-replace-btn { padding:4px 10px; border-radius:6px; border:1px solid var(--border);
-                      background:transparent; color:var(--accent); font-size:11px;
+                   border:1px solid var(--border); border-radius:8px; padding:12px;
+                   font-size:15px; }
+  .owm-dot { width:10px; height:10px; border-radius:50%; background:var(--green); flex-shrink:0; }
+  .owm-replace-btn { padding:8px 14px; border-radius:8px; border:1px solid var(--border);
+                      background:transparent; color:var(--accent); font-size:14px;
                       cursor:pointer; font-family:inherit; }
-  .owm-input-meta { display:flex; justify-content:space-between; margin-top:4px;
-                     font-size:11px; color:var(--sub); }
-  .field-error { margin-top:5px; font-size:11px; color:var(--red); }
-  .group-card { background:var(--card); border-radius:8px; overflow:hidden; margin-bottom:10px; }
-  .group-header { display:flex; align-items:center; padding:8px 10px; gap:8px;
+  .owm-input-meta { display:flex; justify-content:space-between; margin-top:5px;
+                     font-size:14px; color:var(--sub); }
+  .field-error { margin-top:6px; font-size:14px; color:var(--red); }
+  .group-card { background:var(--card); border-radius:10px; overflow:hidden; margin-bottom:12px; }
+  .group-header { display:flex; align-items:center; padding:12px; gap:10px;
                    border-bottom:1px solid var(--border); }
-  .group-color { width:12px; height:12px; border-radius:3px; }
-  .group-name { flex:1; font-size:12px; font-weight:600; }
-  .task-row { display:flex; align-items:center; padding:6px 10px;
-               border-bottom:1px solid rgba(30,45,69,0.4); gap:8px; font-size:11px; }
+  .group-color { width:14px; height:14px; border-radius:4px; }
+  .group-name { flex:1; font-size:16px; font-weight:600; }
+  .task-row { display:flex; align-items:center; padding:11px 12px;
+               border-bottom:1px solid rgba(30,45,69,0.4); gap:10px; font-size:15px; }
   .task-row-name { flex:1; color:var(--text); }
-  .task-row-time { color:var(--sub); font-size:10px; }
-  .add-link { padding:6px 10px; font-size:10px; color:var(--accent); display:block;
+  .task-row-time { color:var(--sub); font-size:13px; }
+  .add-link { padding:11px 12px; font-size:14px; color:var(--accent); display:block;
                background:none; border:none; cursor:pointer; font-family:inherit; text-align:left; width:100%; }
-  .add-group-btn { width:100%; padding:9px; background:transparent;
+  .add-group-btn { width:100%; padding:13px; background:transparent;
                     border:1px solid var(--border); color:var(--accent);
-                    border-radius:6px; font-size:12px; cursor:pointer; font-family:inherit; }
-  .task-row-actions { display:flex; gap:6px; flex-shrink:0; }
-  .icon-btn { background:none; border:none; color:var(--sub); font-size:12px;
-               cursor:pointer; padding:2px 4px; font-family:inherit; }
+                    border-radius:8px; font-size:16px; cursor:pointer; font-family:inherit; }
+  .task-row-actions { display:flex; gap:8px; flex-shrink:0; }
+  .icon-btn { background:none; border:none; color:var(--sub); font-size:18px;
+               cursor:pointer; padding:6px 8px; font-family:inherit; }
   .icon-btn:hover { color:var(--accent); }
   .icon-btn.danger:hover { color:var(--red); }
   .group-actions { display:flex; gap:4px; flex-shrink:0; }
-  .task-edit-form { padding:10px; background:rgba(0,0,0,0.15);
+  .task-edit-form { padding:12px; background:rgba(0,0,0,0.15);
                       border-bottom:1px solid rgba(30,45,69,0.4); }
-  .task-edit-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px; }
+  .task-edit-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px; }
   .task-edit-row.full { grid-template-columns:1fr; }
-  .task-edit-actions { display:flex; gap:8px; margin-top:2px; }
-  .btn-small { padding:6px 12px; border-radius:6px; font-size:11px; font-weight:600;
+  .task-edit-actions { display:flex; gap:10px; margin-top:2px; }
+  .btn-small { padding:10px 16px; border-radius:8px; font-size:15px; font-weight:600;
                 cursor:pointer; font-family:inherit; border:none; }
   .btn-small.primary { background:var(--accent); color:#000; }
   .btn-small.ghost { background:transparent; border:1px solid var(--border); color:var(--sub); }
-  .checkbox-field { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--sub); }
+  .checkbox-field { display:flex; align-items:center; gap:8px; font-size:15px; color:var(--sub); }
   a { color:var(--accent); text-decoration:none; }
-  .nav { display:flex; gap:8px; margin-bottom:16px; }
-  .nav a { font-size:12px; color:var(--sub); padding:5px 10px; border:1px solid var(--border);
-            border-radius:6px; }
+  .nav { display:flex; gap:10px; margin-bottom:18px; }
+  .nav a { font-size:15px; color:var(--sub); padding:8px 14px; border:1px solid var(--border);
+            border-radius:8px; }
   .nav a.active { color:var(--accent); border-color:var(--accent); }
   .toast { display:none; position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
-            background:var(--green); color:#000; padding:8px 16px; border-radius:8px;
-            font-size:13px; font-weight:600; }
+            background:var(--green); color:#000; padding:12px 20px; border-radius:10px;
+            font-size:16px; font-weight:600; }
 </style>
 </head>
 <body>
@@ -113,6 +117,14 @@
     <input type="text" id="city" class="config-input" placeholder="e.g. London">
   </div>
 
+  <div class="field">
+    <label class="config-label">Timer style</label>
+    <select id="tstyle" class="config-input">
+      <option value="0">Digital clock</option>
+      <option value="1">Rainbow dial</option>
+    </select>
+  </div>
+
   <!-- OWM Key field with Replace flow -->
   <div class="field" id="owm-field">
     <label class="config-label">OpenWeatherMap API Key</label>
@@ -120,7 +132,7 @@
       <div class="owm-hint-box">
         <div class="owm-dot" id="owm-dot"></div>
         <span id="owm-hint-text" style="flex:1;font-family:monospace"></span>
-        <span id="owm-status-text" style="font-size:10px;color:var(--sub)">active</span>
+        <span id="owm-status-text" style="font-size:13px;color:var(--sub)">active</span>
         <button class="owm-replace-btn" onclick="startReplaceKey()">Replace</button>
       </div>
     </div>
@@ -145,9 +157,35 @@
 <div class="section">
   <div class="section-title">Task Groups</div>
   <div id="groups-container">
-    <div style="color:var(--sub);font-size:12px;text-align:center;padding:20px;">Loading schedule…</div>
+    <div style="color:var(--sub);font-size:15px;text-align:center;padding:20px;">Loading schedule…</div>
   </div>
   <button class="add-group-btn" onclick="addGroup()">＋ Add Group</button>
+</div>
+
+<!-- Firmware / filesystem update (OTA) -->
+<div class="section">
+  <div class="section-title">Update (OTA)</div>
+  <div class="field">
+    <label class="config-label">Firmware — firmware.bin (optional)</label>
+    <input type="file" id="fwfile" accept=".bin" class="config-input">
+  </div>
+  <div class="field">
+    <label class="config-label">Filesystem — littlefs.bin (optional)</label>
+    <input type="file" id="fsfile" accept=".bin" class="config-input">
+  </div>
+  <button class="save-btn" onclick="uploadFirmware()">Upload &amp; Flash</button>
+  <div id="fwprog" style="display:none;margin-top:12px;">
+    <div style="background:var(--card);border-radius:8px;height:16px;overflow:hidden;border:1px solid var(--border);">
+      <div id="fwbar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
+    </div>
+    <div id="fwstatus" style="font-size:14px;color:var(--sub);margin-top:8px;">Uploading…</div>
+  </div>
+  <div style="font-size:13px;color:var(--sub);margin-top:8px;line-height:1.5;">
+    Pick the images from <code>.pio/build/seeed_xiao_esp32c3/</code> (<code>firmware.bin</code> and/or
+    <code>littlefs.bin</code>) — flash either or both in one go. Each file is validated before flashing,
+    and the device reboots into the new build automatically. Don't power off while flashing. A rejected
+    firmware leaves the current one running, so a bad file can't brick the device.
+  </div>
 </div>
 
 <div class="toast" id="toast">Saved ✓</div>
@@ -158,6 +196,77 @@ function showToast(msg) {
   t.textContent = msg + ' ✓';
   t.style.display = 'block';
   setTimeout(() => t.style.display = 'none', 2000);
+}
+
+// ── OTA firmware / filesystem upload, with pre-flight validation ────────────
+function kb(n) { return Math.round(n / 1024) + ' KB'; }
+
+async function uploadFirmware() {
+  const fw = document.getElementById('fwfile').files[0] || null;
+  const fs = document.getElementById('fsfile').files[0] || null;
+  if (!fw && !fs) { alert('Choose a firmware and/or filesystem .bin first.'); return; }
+
+  // Partition limits for the default.csv scheme (app slot / filesystem).
+  const APP_MAX = 1310720;
+  const FS_MAX  = 1441792;
+
+  // Extension + size sanity — reject obviously wrong files before touching flash.
+  if (fw && !fw.name.toLowerCase().endsWith('.bin')) { alert('Firmware must be a .bin file.'); return; }
+  if (fs && !fs.name.toLowerCase().endsWith('.bin')) { alert('Filesystem must be a .bin file.'); return; }
+  if (fw && fw.size > APP_MAX) { alert('Firmware is ' + kb(fw.size) + ', larger than the ' + kb(APP_MAX) + ' app slot. Wrong file or partition scheme — not flashing.'); return; }
+  if (fs && fs.size > FS_MAX)  { alert('Filesystem image is ' + kb(fs.size) + ', larger than the ' + kb(FS_MAX) + ' filesystem partition — not flashing.'); return; }
+  if (fw && fw.size < 100000)  { if (!confirm('Firmware is only ' + kb(fw.size) + ' — that seems too small for a real build. Flash anyway?')) return; }
+
+  // The strongest guard: a real ESP32 app image starts with magic byte 0xE9.
+  if (fw) {
+    const b0 = new Uint8Array(await fw.slice(0, 1).arrayBuffer())[0];
+    if (b0 !== 0xE9) { alert('That firmware file does not start with the ESP32 image magic (0xE9). It is not a valid firmware.bin — refusing to flash.'); return; }
+  }
+
+  // Warn if the files look swapped between the two slots.
+  if (fw && /littlefs|spiffs/i.test(fw.name)) { if (!confirm('The firmware slot holds a file named like a filesystem image. Continue?')) return; }
+  if (fs && /firmware/i.test(fs.name))         { if (!confirm('The filesystem slot holds a file named like firmware. Continue?')) return; }
+
+  if (!confirm('Flash the selected image(s) and reboot the device? Do not power off during the update.')) return;
+
+  const prog   = document.getElementById('fwprog');
+  const bar    = document.getElementById('fwbar');
+  const status = document.getElementById('fwstatus');
+  prog.style.display = 'block';
+  bar.style.width = '0%';
+  status.textContent = 'Uploading…';
+
+  // Canonical filenames so the device routes each image to the correct
+  // partition regardless of what the files are named locally.
+  const fd = new FormData();
+  if (fw) fd.append('firmware',   fw, 'firmware.bin');
+  if (fs) fd.append('filesystem', fs, 'littlefs.bin');
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update');
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded / e.total * 100);
+      bar.style.width = pct + '%';
+      status.textContent = (pct < 100) ? ('Uploading… ' + pct + '%') : 'Flashing…';
+    }
+  };
+  xhr.onload = () => {
+    let ok = false;
+    try { ok = JSON.parse(xhr.responseText).ok; } catch (e) {}
+    if (xhr.status === 200 && ok) {
+      bar.style.width = '100%';
+      status.textContent = 'Flashed ✓ — device rebooting. Reconnect in ~15s.';
+    } else {
+      status.textContent = 'Update rejected by device — current build kept. Check the file and try again.';
+    }
+  };
+  // The board reboots the instant flashing finishes, so the socket often drops
+  // before onload — treat that as (most likely) success rather than an error.
+  xhr.onerror = () => {
+    status.textContent = 'Upload finished — device rebooting. Reconnect in ~15s.';
+  };
+  xhr.send(fd);
 }
 
 let owmKeyIsSet     = false;
@@ -253,6 +362,7 @@ async function saveConfig() {
     timezone: document.getElementById('timezone').value,
     city:     document.getElementById('city').value.trim(),
     metric:   document.getElementById('units').value === 'metric',
+    tstyle:   parseInt(document.getElementById('tstyle').value, 10),
   };
   if (owmKey !== null) payload.owmkey = owmKey;
 
@@ -275,6 +385,7 @@ async function loadConfig() {
   document.getElementById('timezone').value = config.timezone || 'UTC0';
   document.getElementById('city').value     = config.city     || '';
   document.getElementById('units').value    = config.metric   ? 'metric' : 'imperial';
+  document.getElementById('tstyle').value   = String(config.tstyle || 0);
   initOwmField(config);
 }
 
@@ -295,6 +406,18 @@ function escapeHtml(s) {
 
 function genId(prefix) {
   return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// Show a stored 24-hour "HH:MM" as 12-hour with AM/PM (e.g. "14:30" -> "2:30 PM").
+// Storage and the <input type="time"> value stay 24-hour; this only affects display.
+function fmt12(hhmm) {
+  if (!hhmm || hhmm.indexOf(':') < 0) return hhmm || '';
+  const [hStr, mStr] = hhmm.split(':');
+  let h = parseInt(hStr, 10);
+  if (isNaN(h)) return hhmm;
+  const ampm = h < 12 ? 'AM' : 'PM';
+  h = h % 12; if (h === 0) h = 12;
+  return h + ':' + (mStr || '00').padStart(2, '0') + ' ' + ampm;
 }
 
 async function loadSchedule() {
@@ -402,7 +525,7 @@ function renderTaskRow(g, t) {
   return `
     <div class="task-row">
       <div class="task-row-name">${escapeHtml(t.name)}${t.enabled ? '' : ' <span style="color:var(--sub)">(disabled)</span>'}</div>
-      <div class="task-row-time">${escapeHtml(t.start_time)} · ${t.duration_min} min · ${escapeHtml(t.recurrence)}</div>
+      <div class="task-row-time">${escapeHtml(fmt12(t.start_time))} · ${t.duration_min} min · ${escapeHtml(t.recurrence)}</div>
       <div class="task-row-actions">
         <button class="icon-btn" title="Edit task" onclick="editTask('${g.id}','${t.id}')">✎</button>
         <button class="icon-btn danger" title="Delete task" onclick="deleteTask('${g.id}','${t.id}')">🗑</button>

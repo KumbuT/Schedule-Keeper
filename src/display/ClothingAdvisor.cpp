@@ -35,26 +35,26 @@ std::vector<ClothingItem> ClothingAdvisor::recommend(const WeatherData& wx) {
   else if (temp < 8)       items.push_back({"CT", "Winter coat"});
   else if (temp < 14)      items.push_back({"JK", "Jacket + scarf"});
   else if (temp < 18)      items.push_back({"JK", "Light jacket"});
-  else if (temp < 24)      items.push_back({"TS", "T-shirt / shirt"});
+  else if (temp < 24)      items.push_back({"TS", "T-shirt"});
   else                     items.push_back({"TS", "Light top"});
 
   // ── Bottom layer ─────────────────────────────────────────────────────────
-  if (temp < 8 || snowy)   items.push_back({"PT", "Thermal trousers"});
-  else if (temp < 18)      items.push_back({"PT", "Trousers / jeans"});
-  else                     items.push_back({"SH", "Shorts / light trousers"});
+  if (temp < 8 || snowy)   items.push_back({"PT", "Thermals"});
+  else if (temp < 18)      items.push_back({"PT", "Trousers"});
+  else                     items.push_back({"SH", "Shorts"});
 
   // ── Footwear ─────────────────────────────────────────────────────────────
   if (snowy || temp < 2)       items.push_back({"BT", "Winter boots"});
-  else if (rainy || stormy)    items.push_back({"BT", "Waterproof shoes"});
-  else if (temp > 22)          items.push_back({"SN", "Trainers / sandals"});
+  else if (rainy || stormy)    items.push_back({"BT", "Rain boots"});
+  else if (temp > 22)          items.push_back({"SN", "Sandals"});
   else                         items.push_back({"SN", "Trainers"});
 
   // ── Rain gear ────────────────────────────────────────────────────────────
-  if (stormy)                  items.push_back({"!!", "Stay indoors if possible"});
+  if (stormy)                  items.push_back({"!!", "Stay indoors"});
   else if (rainy)               items.push_back({"UM", "Umbrella"});
 
   // ── Wind chill ───────────────────────────────────────────────────────────
-  if (wind > 30 && temp < 15)  items.push_back({"SC", "Scarf / windbreaker"});
+  if (wind > 30 && temp < 15)  items.push_back({"SC", "Windbreaker"});
   if (wind > 20 && temp < 10)  items.push_back({"GL", "Gloves"});
 
   // ── Sun ──────────────────────────────────────────────────────────────────

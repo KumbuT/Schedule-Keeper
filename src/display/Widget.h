@@ -132,6 +132,18 @@ public:
     }
   }
 
+  // Enable/disable the Timer button. Disabled while a scheduled task is running
+  // (the manual timer isn't allowed then). Drawn dimmed when disabled.
+  void setTimerEnabled(bool e)
+  {
+    if (e != _timerEnabled)
+    {
+      _timerEnabled = e;
+      markDirty();
+    }
+  }
+  bool timerEnabled() const { return _timerEnabled; }
+
   void draw(TFT_eSprite &c) override
   {
     const int y = _bounds.y, h = _bounds.h;
@@ -153,13 +165,15 @@ public:
       }
     }
 
-    // Timer: a clock face with hands and a top stem (orange)
+    // Timer: a clock face with hands and a top stem. Dimmed to gray when the
+    // button is disabled (a scheduled task is running).
     {
       const int cx = 120;
-      c.drawCircle(cx, midY, 10, CLR_ORANGE);
-      c.fillRect(cx - 1, midY - 13, 3, 3, CLR_ORANGE);
-      c.drawLine(cx, midY, cx, midY - 6, CLR_ORANGE);
-      c.drawLine(cx, midY, cx + 5, midY, CLR_ORANGE);
+      uint32_t tc = _timerEnabled ? CLR_ORANGE : CLR_SUBTEXT;
+      c.drawCircle(cx, midY, 10, tc);
+      c.fillRect(cx - 1, midY - 13, 3, 3, tc);
+      c.drawLine(cx, midY, cx, midY - 6, tc);
+      c.drawLine(cx, midY, cx + 5, midY, tc);
     }
 
     // Mute: speaker cone, plus sound-wave chevrons or a slash when muted
@@ -186,6 +200,7 @@ public:
 
 private:
   bool _muted = false;
+  bool _timerEnabled = true;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,11 +223,11 @@ public:
       markDirty();
     }
   }
-  void setDate(const char *d)
+  void setTz(const char *z)
   {
-    if (_date != d)
+    if (_tz != z)
     {
-      _date = d;
+      _tz = z;
       markDirty();
     }
   }
@@ -247,10 +262,29 @@ public:
     char timeBuf[12];
     snprintf(timeBuf, sizeof(timeBuf), "%d:%02d %s", h12, _min,
              _hour < 12 ? "AM" : "PM");
-    c.setTextDatum(TC_DATUM);
+    // Clock + timezone on ONE line, centered as a unit between the wifi bars
+    // (left) and the battery (right). The time is the hero (size 2); the tz
+    // abbreviation sits just to its right, subdued, at size 1.
+    c.setTextSize(2);
+    int tw = c.textWidth(timeBuf);
+    c.setTextSize(1);
+    int zw = _tz.length() ? c.textWidth(_tz.c_str()) : 0;
+    const int gap = 6;
+    int total = tw + (zw ? gap + zw : 0);
+    int startX = 120 - total / 2;
+    if (startX < 30) startX = 30; // stay clear of the wifi bars
+
+    c.setTextDatum(ML_DATUM); // left-anchored, vertically centered on the strip
     c.setTextColor(CLR_TEXT, CLR_STATUSBG);
     c.setTextSize(2);
-    c.drawString(timeBuf, 120, 2);
+    c.drawString(timeBuf, startX, 14);
+
+    if (zw)
+    {
+      c.setTextColor(CLR_SUBTEXT, CLR_STATUSBG);
+      c.setTextSize(1);
+      c.drawString(_tz.c_str(), startX + tw + gap, 14);
+    }
     c.setTextDatum(TL_DATUM);
   }
 
@@ -305,7 +339,7 @@ private:
   }
 
   int _hour = -1, _min = -1;
-  String _date;
+  String _tz;
   int _batt = -1;
   int _rssi = 0, _bars = -1;
 };

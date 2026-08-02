@@ -13,8 +13,10 @@ void AudioManager::_installDriver() {
     .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count        = 8,   // more buffered audio (~128 ms @16 kHz) so a
-    .dma_buf_len          = 256, // slow render frame can't drain it to underrun
+    .dma_buf_count        = 8,   // ~128 ms buffered @16 kHz. The task-complete
+    .dma_buf_len          = 256, // celebration is now a small card-region redraw
+                                 // (no full-frame blocking push), so this is
+                                 // plenty and audio no longer starves.
     .use_apll             = false,
     .tx_desc_auto_clear   = true,
   };
